@@ -2,7 +2,7 @@
  * RoboControlApp - Main embeddable component
  *
  * Initializes all services and provides the application shell.
- * Supports both standalone and qm-hub-app embedded modes.
+ * Supports both standalone and glean-oak-app embedded modes.
  */
 
 import React, { useEffect, useMemo } from "react";
@@ -53,10 +53,10 @@ export interface RoboControlAppProps {
   /** Children to render inside the AppShell */
   children?: React.ReactNode;
 
-  // Standard qm-hub embed props
-  /** SSO tokens from qm-hub-app (accepted for interface consistency) */
+  // Standard glean-oak embed props
+  /** SSO tokens from glean-oak-app (accepted for interface consistency) */
   authTokens?: { accessToken: string; refreshToken: string; userId: string };
-  /** Whether this app is embedded in qm-hub-app */
+  /** Whether this app is embedded in glean-oak-app */
   embedded?: boolean;
   /** Use parent's BrowserRouter (no-op — no internal routing) */
   useRouter?: boolean;

@@ -515,7 +515,7 @@ flowchart LR
         ENV_D["Same VITE_* env vars"]
     end
 
-    subgraph Embed["qm-hub-app Embed"]
+    subgraph Embed["glean-oak-app Embed"]
         SHADOW["ShadowWrapper"]
         RCA["RoboControlApp"]
         SHADOW --> RCA
@@ -541,10 +541,10 @@ flowchart LR
 
 Minimal Rust — only `tauri_plugin_opener` initialized + placeholder `greet` command. All rover control is JavaScript/Socket.IO. No native data layer.
 
-## qm-hub-app Embed
+## glean-oak-app Embed
 
-Robo Control is registered in `qm-hub-app` at `/robo-control/*` behind `AuthGuard + AppAccessGuard`. Entry via `RoboControlEmbed` → `ShadowWrapper` → `RoboControlApp`.
+Robo Control is registered in `glean-oak-app` at `/robo-control/*` behind `AuthGuard + AppAccessGuard`. Entry via `RoboControlEmbed` → `ShadowWrapper` → `RoboControlApp`.
 
-**Auth model**: `authTokens` (qm-hub JWT) accepted for interface consistency but unused. Socket.IO credentials (`auth.username`/`auth.password`) are independent — configure via `VITE_AUTH_USERNAME`/`VITE_AUTH_PASSWORD` in robo-control-app's own env.
+**Auth model**: `authTokens` (glean-oak JWT) accepted for interface consistency but unused. Socket.IO credentials (`auth.username`/`auth.password`) are independent — configure via `VITE_AUTH_USERNAME`/`VITE_AUTH_PASSWORD` in robo-control-app's own env.
 
 **Fallback**: When embedded without `adapters`, `RoboControlApp` renders `RoboRoverControl` directly (Pattern A). Pattern B (service abstraction) available for future use by passing `adapters` prop.

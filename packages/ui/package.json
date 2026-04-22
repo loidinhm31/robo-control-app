@@ -1,0 +1,48 @@
+{
+  "name": "@robo-fleet/ui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./components/atoms": "./src/components/atoms/index.ts",
+    "./components/molecules": "./src/components/molecules/index.ts",
+    "./components/organisms": "./src/components/organisms/index.ts",
+    "./components/features": "./src/components/features/index.ts",
+    "./components/templates": "./src/components/templates/index.ts",
+    "./components/pages": "./src/components/pages/index.ts",
+    "./styles": "./src/styles/globals.css",
+    "./adapters": "./src/adapters/index.ts",
+    "./adapters/factory": "./src/adapters/factory/index.ts",
+    "./adapters/factory/interfaces": "./src/adapters/factory/interfaces/index.ts",
+    "./hooks": "./src/hooks/index.ts",
+    "./services": "./src/services/index.ts",
+    "./embed": "./src/embed/index.ts",
+    "./lib": "./src/lib/index.ts"
+  },
+  "dependencies": {
+    "@radix-ui/react-popover": "^1.1.15",
+    "@radix-ui/react-slot": "^1.1.1",
+    "@robo-fleet/shared": "workspace:*",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.474.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-joystick-component": "^6.2.1",
+    "socket.io-client": "^4.8.1",
+    "tailwind-merge": "^2.6.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.17",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "tailwindcss": "^4.1.17",
+    "typescript": "~5.8.3"
+  },
+  "peerDependencies": {
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  }
+}

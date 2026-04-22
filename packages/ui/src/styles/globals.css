@@ -75,7 +75,7 @@
   --animate-glow: glow 2s ease-in-out infinite alternate;
 }
 
-/* Base Styles — wrapped in @layer base to prevent leaking into qm-hub-app light DOM */
+/* Base Styles — wrapped in @layer base to prevent leaking into glean-oak-app light DOM */
 @layer base {
   * {
     border-color: hsl(var(--color-border));
@@ -413,7 +413,7 @@
 }
 
 /* Alternative gradient background */
-.qm-app-root {
+.glean-oak-app-root {
   background: linear-gradient(135deg, hsl(var(--color-background)) 0%, #0a0e27 50%, #1e1b4b 100%);
   color: hsl(var(--color-foreground));
   min-height: 100vh;

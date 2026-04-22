@@ -83,16 +83,16 @@ All data types are organized by domain: `commands.ts`, `telemetry.ts`, `tracking
 
 `build` has `dependsOn: ["^build"]` — packages build before apps. `check-types` and `lint` also depend on package builds. `dev` is persistent and non-cached.
 
-## qm-hub-app Embed Interface
+## glean-oak-app Embed Interface
 
-The app is embedded in `qm-hub-app` via `packages/ui/src/embed/RoboControlApp.tsx`, exported from `@robo-fleet/ui/embed`.
+The app is embedded in `glean-oak-app` via `packages/ui/src/embed/RoboControlApp.tsx`, exported from `@robo-fleet/ui/embed`.
 
 ```typescript
 <RoboControlApp
   socketUrl="ws://..."         // falls back to VITE_SOCKET_IO_URL
   auth={{ username, password }}
   embedded={true}
-  useRouter={false}            // share qm-hub-app's BrowserRouter
+  useRouter={false}            // share glean-oak-app's BrowserRouter
   basePath="/robo-control"
   authTokens={{ accessToken, refreshToken, userId }} // optional — not used for socket auth
   onLogoutRequest={() => {}}
