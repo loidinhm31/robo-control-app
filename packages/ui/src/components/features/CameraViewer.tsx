@@ -28,6 +28,7 @@ type ViewMode = "camera" | "camera_with_detections" | "detections_only";
 
 interface JPEGVideoFrame {
   timestamp: number;
+  capture_timestamp_ms?: number;
   frame_id: number;
   width: number;
   height: number;
@@ -53,6 +54,8 @@ interface StreamStats {
   detections_received: number;
   detection_fps: number;
   total_objects_detected: number;
+  capture_to_render_ms: number;
+  receive_to_render_ms: number;
 }
 
 interface CameraViewerProps {
@@ -91,6 +94,8 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
     detections_received: 0,
     detection_fps: 0,
     total_objects_detected: 0,
+    capture_to_render_ms: 0,
+    receive_to_render_ms: 0,
   });
 
   const frameCountRef = useRef(0);
@@ -98,6 +103,13 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
   const bytesReceivedRef = useRef(0);
   const detectionCountRef = useRef(0);
   const lastDetectionFpsUpdateRef = useRef(Date.now());
+  const renderAgeSamplesRef = useRef<number[]>([]);
+  const renderDurationSamplesRef = useRef<number[]>([]);
+  const renderErrorsRef = useRef(0);
+  const renderDropsRef = useRef(0);
+  const renderBytesRef = useRef(0);
+  const lastRenderedFrameIdRef = useRef<number | null>(null);
+  const lastRenderMetricsRef = useRef(Date.now());
 
   // Audio playback references
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -237,6 +249,7 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
     if (!socket || !streamEnabled) return;
 
     const handleVideoFrame = (frame: JPEGVideoFrame) => {
+      const receivedAt = performance.now();
       setStats((prev) => ({
         ...prev,
         video_frames_received: prev.video_frames_received + 1,
@@ -295,6 +308,63 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
                   }
                 }
               }
+
+              const captureTimestamp = frame.capture_timestamp_ms ?? frame.timestamp;
+              const renderTimestamp = Date.now();
+              const captureToRenderMs = Math.max(0, renderTimestamp - captureTimestamp);
+              const receiveToRenderMs = performance.now() - receivedAt;
+              if (captureTimestamp > renderTimestamp) {
+                renderErrorsRef.current++;
+              } else {
+                renderAgeSamplesRef.current.push(captureToRenderMs);
+              }
+              renderDurationSamplesRef.current.push(receiveToRenderMs);
+              renderBytesRef.current += jpegData.length;
+              const previousFrameId = lastRenderedFrameIdRef.current;
+              if (previousFrameId === null) {
+                lastRenderedFrameIdRef.current = frame.frame_id;
+              } else if (frame.frame_id > previousFrameId) {
+                renderDropsRef.current += frame.frame_id - previousFrameId - 1;
+                lastRenderedFrameIdRef.current = frame.frame_id;
+              } else {
+                renderErrorsRef.current++;
+              }
+              setStats(prev => ({
+                ...prev,
+                capture_to_render_ms: captureToRenderMs,
+                receive_to_render_ms: receiveToRenderMs,
+              }));
+              const metricsNow = Date.now();
+              if (metricsNow - lastRenderMetricsRef.current >= 5000) {
+                const samples = renderAgeSamplesRef.current.sort((a, b) => a - b);
+                const renderDurations = renderDurationSamplesRef.current.sort((a, b) => a - b);
+                const percentile = (values: number[], percentileValue: number) => values[Math.min(
+                  values.length - 1,
+                  Math.round((values.length - 1) * percentileValue),
+                )] ?? 0;
+                console.info("video_pipeline_metric", {
+                  stage: "browser_render",
+                  frame_id: frame.frame_id,
+                  count: renderDurations.length,
+                  bytes: renderBytesRef.current,
+                  drops: renderDropsRef.current,
+                  errors: renderErrorsRef.current,
+                  capture_to_render_p50_ms: percentile(samples, 0.50),
+                  capture_to_render_p95_ms: percentile(samples, 0.95),
+                  capture_to_render_p99_ms: percentile(samples, 0.99),
+                  max_ms: samples[samples.length - 1] ?? 0,
+                  receive_to_render_p50_ms: percentile(renderDurations, 0.50),
+                  receive_to_render_p95_ms: percentile(renderDurations, 0.95),
+                  receive_to_render_p99_ms: percentile(renderDurations, 0.99),
+                  receive_to_render_max_ms: renderDurations[renderDurations.length - 1] ?? 0,
+                });
+                renderAgeSamplesRef.current = [];
+                renderDurationSamplesRef.current = [];
+                renderErrorsRef.current = 0;
+                renderDropsRef.current = 0;
+                renderBytesRef.current = 0;
+                lastRenderMetricsRef.current = metricsNow;
+              }
             }
           }
 
@@ -322,6 +392,7 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
         };
 
         img.onerror = () => {
+          renderErrorsRef.current++;
           console.error("❌ Failed to load JPEG image");
           URL.revokeObjectURL(url);
         };

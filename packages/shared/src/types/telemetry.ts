@@ -24,6 +24,7 @@ export interface RoverTelemetry {
 
 export interface VideoFrame {
   timestamp: number;
+  capture_timestamp_ms?: number;
   frame_id: number;
   width: number;
   height: number;
