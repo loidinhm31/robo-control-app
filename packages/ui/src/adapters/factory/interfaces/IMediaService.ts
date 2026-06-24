@@ -10,7 +10,7 @@ export interface JPEGVideoFrame {
   width: number;
   height: number;
   codec: "jpeg";
-  data: number[]; // JPEG image as byte array
+  data: ArrayBuffer | Uint8Array; // JPEG image bytes
 }
 
 export interface AudioFrame {

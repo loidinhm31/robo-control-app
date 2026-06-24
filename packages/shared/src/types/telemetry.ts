@@ -28,9 +28,10 @@ export interface VideoFrame {
   frame_id: number;
   width: number;
   height: number;
-  format: string;
-  quality: number;
-  data: string;
+  codec: "jpeg";
+  format?: string;
+  quality?: number;
+  data: ArrayBuffer | Uint8Array;
   overlay_data?: OverlayData;
 }
 

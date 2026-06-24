@@ -18,7 +18,7 @@ import type { SystemMetrics } from "./performance";
 import type { FleetStatus, FleetSelectCommand, ActiveRoversStatus } from "./fleet";
 
 export interface ServerToClientEvents {
-  video_frame: (frame: VideoFrame) => void;
+  video_frame: (frame: Omit<VideoFrame, "data">, data: ArrayBuffer | Uint8Array) => void;
   audio_frame: (frame: { timestamp: number; frame_id: number; sample_rate: number; channels: number; format: string; data: number[] }) => void;
   detections: (frame: DetectionFrame) => void;
   tracked_detections: (frame: DetectionFrame) => void;
@@ -35,6 +35,7 @@ export interface ClientToServerEvents {
   rover_command: (command: WebRoverCommand) => void;
   tracking_command: (command: WebTrackingCommand) => void;
   camera_control: (control: { command: string }) => void;
+  stream_control: (control: { command: "start" | "stop"; video_enabled: boolean; target_fps?: number }) => void;
   audio_control: (control: { command: string }) => void;
   tts_command: (command: { text: string }) => void;
   audio_stream: (data: { audio_data: number[] }) => void;

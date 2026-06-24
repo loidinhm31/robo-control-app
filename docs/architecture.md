@@ -329,7 +329,9 @@ flowchart LR
 | `audio_control` | `{ command: "start" \| "stop" }` | VoiceControls |
 | `tts_command` | `{ text: string }` | VoiceControls |
 | `audio_stream` | Raw audio chunks | Microphone capture |
-| `video_control` | start / stop / quality / FPS | CameraViewer |
+| `stream_control` | `{ command: "start" \| "stop", video_enabled, target_fps }` | CameraViewer demand control |
+
+`video_frame` is delivered as a Socket.IO binary event: the first callback argument is frame metadata (`timestamp`, `capture_timestamp_ms`, `frame_id`, dimensions, `codec`) and the second argument is the JPEG bytes as `ArrayBuffer | Uint8Array`. The browser does not handle legacy JSON byte arrays.
 
 ## Type System
 
@@ -413,8 +415,8 @@ classDiagram
 ```mermaid
 stateDiagram-v2
     [*] --> Idle
-    Idle --> Streaming: video_control start
-    Streaming --> Rendering: video_frame received
+    Idle --> Streaming: stream_control start
+    Streaming --> Rendering: video_frame(metadata, jpegBytes)
 
     state Rendering {
         [*] --> DecodeJPEG
@@ -424,7 +426,7 @@ stateDiagram-v2
     }
 
     Rendering --> Streaming: next frame
-    Streaming --> Idle: video_control stop
+    Streaming --> Idle: stream_control stop
 
     state DrawOverlays {
         [*] --> BBoxes: strokeRect per detection

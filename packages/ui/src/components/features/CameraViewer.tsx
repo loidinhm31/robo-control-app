@@ -33,7 +33,7 @@ interface JPEGVideoFrame {
   width: number;
   height: number;
   codec: "jpeg";
-  data: number[]; // JPEG image as byte array
+  data: ArrayBuffer | Uint8Array; // JPEG image bytes
 }
 
 interface AudioFrame {
@@ -71,6 +71,7 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const imgRef = useRef<HTMLImageElement>(new Image());
+  const activeObjectUrlRef = useRef<string | null>(null);
 
   const [streamEnabled, setStreamEnabled] = useState(false);
   const [videoEnabled, setVideoEnabled] = useState(true);
@@ -110,6 +111,7 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
   const renderBytesRef = useRef(0);
   const lastRenderedFrameIdRef = useRef<number | null>(null);
   const lastRenderMetricsRef = useRef(Date.now());
+  const streamDemandActiveRef = useRef(false);
 
   // Audio playback references
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -120,6 +122,45 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
   const lowPassFilterRef = useRef<BiquadFilterNode | null>(null);
   const gainNodeRef = useRef<GainNode | null>(null);
   const maxBufferQueueSize = useRef<number>(20); // Max queue size to prevent excessive latency
+
+  const revokeActiveObjectUrl = () => {
+    if (activeObjectUrlRef.current) {
+      URL.revokeObjectURL(activeObjectUrlRef.current);
+      activeObjectUrlRef.current = null;
+    }
+  };
+
+  const normalizeVideoBytes = (data: ArrayBuffer | Uint8Array): Uint8Array => {
+    if (data instanceof Uint8Array) {
+      return data;
+    }
+    return new Uint8Array(data);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (streamDemandActiveRef.current && socket) {
+        socket.emit("stream_control", {
+          command: "stop",
+          video_enabled: false,
+          target_fps: 15,
+        });
+        streamDemandActiveRef.current = false;
+      }
+      revokeActiveObjectUrl();
+    };
+  }, [socket]);
+
+  useEffect(() => {
+    if (!socket || !streamEnabled || streamDemandActiveRef.current) return;
+
+    socket.emit("stream_control", {
+      command: "start",
+      video_enabled: true,
+      target_fps: 15,
+    });
+    streamDemandActiveRef.current = true;
+  }, [socket, streamEnabled]);
 
   // Draw detection bounding boxes on canvas
   const drawDetections = (ctx: CanvasRenderingContext2D, detections: DetectionFrame, canvasWidth: number, canvasHeight: number, overlay: boolean = true) => {
@@ -248,7 +289,7 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
   useEffect(() => {
     if (!socket || !streamEnabled) return;
 
-    const handleVideoFrame = (frame: JPEGVideoFrame) => {
+    const handleVideoFrame = (frame: Omit<JPEGVideoFrame, "data">, binaryData: ArrayBuffer | Uint8Array) => {
       const receivedAt = performance.now();
       setStats((prev) => ({
         ...prev,
@@ -258,13 +299,13 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
       if (!canvasRef.current || !videoEnabled) return;
 
       try {
-        // Convert number array to Uint8Array
-        const jpegData = new Uint8Array(frame.data);
+        const jpegData = normalizeVideoBytes(binaryData);
         bytesReceivedRef.current += jpegData.length;
 
-        // Create blob from JPEG data
+        revokeActiveObjectUrl();
         const blob = new Blob([jpegData], { type: 'image/jpeg' });
         const url = URL.createObjectURL(blob);
+        activeObjectUrlRef.current = url;
 
         // Load and render JPEG to canvas
         const img = imgRef.current;
@@ -368,8 +409,11 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
             }
           }
 
-          // Clean up blob URL
-          URL.revokeObjectURL(url);
+          if (activeObjectUrlRef.current === url) {
+            revokeActiveObjectUrl();
+          } else {
+            URL.revokeObjectURL(url);
+          }
 
           // Update FPS counter
           frameCountRef.current++;
@@ -394,7 +438,11 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
         img.onerror = () => {
           renderErrorsRef.current++;
           console.error("❌ Failed to load JPEG image");
-          URL.revokeObjectURL(url);
+          if (activeObjectUrlRef.current === url) {
+            revokeActiveObjectUrl();
+          } else {
+            URL.revokeObjectURL(url);
+          }
         };
 
         img.src = url;
@@ -716,6 +764,13 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
 
     const newState = !streamEnabled;
     setStreamEnabled(newState);
+    streamDemandActiveRef.current = newState;
+
+    socket.emit("stream_control", {
+      command: newState ? "start" : "stop",
+      video_enabled: newState,
+      target_fps: 15,
+    });
 
     console.log(newState ? "Stream started" : "Stream stopped");
   };
