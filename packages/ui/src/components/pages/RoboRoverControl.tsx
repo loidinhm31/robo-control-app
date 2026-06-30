@@ -747,6 +747,7 @@ export const RoboRoverControl: React.FC<RoboRoverControlProps> = ({
               <button
                 onClick={() => setShowCamera(true)}
                 className="w-full py-3 bg-slate-900/70 border border-slate-700 rounded-lg text-slate-300 hover:text-syntax-cyan hover:border-syntax-cyan/50 transition-all font-mono text-sm flex items-center justify-center gap-2 cursor-pointer"
+                data-testid="camera-feed-open"
               >
                 <Camera className="w-4 h-4" />
                 <span className="text-syntax-cyan">show</span>

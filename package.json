@@ -9,7 +9,8 @@
     "dev:native": "turbo dev --filter=@robo-fleet/native",
     "build": "turbo build",
     "check-types": "turbo check-types",
-    "lint": "turbo lint"
+    "lint": "turbo lint",
+    "test:e2e:stream-live": "pnpm --filter @robo-fleet/web test:e2e:stream-live"
   },
   "devDependencies": {
     "turbo": "^2.5.4",

@@ -46,6 +46,9 @@ export type {
   ClientToServerEvents,
   AuthErrorReason,
   AuthErrorEvent,
+  AudioFrameEvent,
+  LegacyAudioFrameEvent,
+  OriginAudioFrameEvent,
 } from "./socket";
 
 // Fleet

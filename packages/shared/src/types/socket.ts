@@ -17,9 +17,27 @@ import type { SpeechTranscription } from "./voice";
 import type { SystemMetrics } from "./performance";
 import type { FleetStatus, FleetSelectCommand, ActiveRoversStatus } from "./fleet";
 
+export interface LegacyAudioFrameEvent {
+  timestamp: number;
+  frame_id: number;
+  sample_rate: number;
+  channels: number;
+  format: string;
+  data: number[];
+}
+
+export interface OriginAudioFrameEvent extends LegacyAudioFrameEvent {
+  capture_timestamp_ms: number;
+  stream_id: string;
+  sample_count: number;
+  entity_id?: string | null;
+}
+
+export type AudioFrameEvent = LegacyAudioFrameEvent | OriginAudioFrameEvent;
+
 export interface ServerToClientEvents {
   video_frame: (frame: Omit<VideoFrame, "data">, data: ArrayBuffer | Uint8Array) => void;
-  audio_frame: (frame: { timestamp: number; frame_id: number; sample_rate: number; channels: number; format: string; data: number[] }) => void;
+  audio_frame: (frame: AudioFrameEvent) => void;
   detections: (frame: DetectionFrame) => void;
   tracked_detections: (frame: DetectionFrame) => void;
   tracking_telemetry: (telemetry: TrackingTelemetry) => void;

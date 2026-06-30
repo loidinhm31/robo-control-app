@@ -21,8 +21,15 @@ import {
   XCircle
 } from "lucide-react";
 import {Socket} from "socket.io-client";
-import type {DetectionFrame, TrackingTelemetry, WebTrackingCommand} from "@robo-fleet/shared/types";
+import type {AudioFrameEvent, DetectionFrame, TrackingTelemetry, WebTrackingCommand} from "@robo-fleet/shared/types";
 import {getClassColor} from "@robo-fleet/shared/constants";
+import {
+  AudioStreamMetrics,
+  normalizeLegacyAudioFrame,
+  observeLongTasks,
+  shouldResetVideoStats,
+} from "../../lib";
+import type {NormalizedAudioFrame} from "../../lib";
 
 type ViewMode = "camera" | "camera_with_detections" | "detections_only";
 
@@ -33,17 +40,10 @@ interface JPEGVideoFrame {
   width: number;
   height: number;
   codec: "jpeg";
-  data: ArrayBuffer | Uint8Array; // JPEG image bytes
+  data: VideoFramePayload; // JPEG image bytes
 }
 
-interface AudioFrame {
-  timestamp: number;
-  frame_id: number;
-  sample_rate: number;
-  channels: number;
-  format: string; // "s16le", "f32le", etc.
-  data: number[]; // PCM audio data as byte array
-}
+type VideoFramePayload = ArrayBuffer | ArrayBufferView | Blob | number[] | null | undefined;
 
 interface StreamStats {
   video_frames_received: number;
@@ -112,6 +112,7 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
   const lastRenderedFrameIdRef = useRef<number | null>(null);
   const lastRenderMetricsRef = useRef(Date.now());
   const streamDemandActiveRef = useRef(false);
+  const lastVideoFrameAtRef = useRef<number | null>(null);
 
   // Audio playback references
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -122,6 +123,14 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
   const lowPassFilterRef = useRef<BiquadFilterNode | null>(null);
   const gainNodeRef = useRef<GainNode | null>(null);
   const maxBufferQueueSize = useRef<number>(20); // Max queue size to prevent excessive latency
+  const audioMetricsRef = useRef(new AudioStreamMetrics());
+  const lastAudioStatsUpdateRef = useRef(0);
+  const lastAudioDebugLogRef = useRef(0);
+  const audioDebugEnabledRef = useRef(
+    Boolean((import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV) &&
+      typeof window !== "undefined" &&
+      new URLSearchParams(window.location.search).get("audioDebug") === "1",
+  );
 
   const revokeActiveObjectUrl = () => {
     if (activeObjectUrlRef.current) {
@@ -130,11 +139,65 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
     }
   };
 
-  const normalizeVideoBytes = (data: ArrayBuffer | Uint8Array): Uint8Array => {
-    if (data instanceof Uint8Array) {
-      return data;
+  const normalizeVideoBytes = async (data: VideoFramePayload): Promise<Uint8Array> => {
+    if (!data) {
+      throw new Error("missing JPEG binary attachment");
     }
-    return new Uint8Array(data);
+    if (data instanceof Blob) {
+      return new Uint8Array(await data.arrayBuffer());
+    }
+    if (data instanceof ArrayBuffer) {
+      return new Uint8Array(data);
+    }
+    if (ArrayBuffer.isView(data)) {
+      return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+    }
+    if (Array.isArray(data)) {
+      return new Uint8Array(data);
+    }
+    throw new Error(`unsupported JPEG payload type: ${Object.prototype.toString.call(data)}`);
+  };
+
+  const assertJpegBytes = (data: Uint8Array, frameId: number) => {
+    const hasJpegMarkers = data.length >= 4 &&
+      data[0] === 0xff &&
+      data[1] === 0xd8 &&
+      data[data.length - 2] === 0xff &&
+      data[data.length - 1] === 0xd9;
+    if (!hasJpegMarkers) {
+      throw new Error(`invalid JPEG payload for frame ${frameId}: bytes=${data.length}, head=${Array.from(data.slice(0, 4)).join(",")}, tail=${Array.from(data.slice(-4)).join(",")}`);
+    }
+  };
+
+  const resetVideoStats = () => {
+    frameCountRef.current = 0;
+    bytesReceivedRef.current = 0;
+    lastFpsUpdateRef.current = Date.now();
+    renderAgeSamplesRef.current = [];
+    renderDurationSamplesRef.current = [];
+    renderErrorsRef.current = 0;
+    renderDropsRef.current = 0;
+    renderBytesRef.current = 0;
+    lastRenderedFrameIdRef.current = null;
+
+    setStats((previous) => {
+      if (
+        previous.video_fps === 0 &&
+        previous.video_bitrate_kbps === 0 &&
+        previous.capture_to_render_ms === 0 &&
+        previous.receive_to_render_ms === 0
+      ) {
+        return previous;
+      }
+
+      return {
+        ...previous,
+        video_fps: 0,
+        video_bitrate_kbps: 0,
+        capture_to_render_ms: 0,
+        receive_to_render_ms: 0,
+      };
+    });
   };
 
   useEffect(() => {
@@ -161,6 +224,25 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
     });
     streamDemandActiveRef.current = true;
   }, [socket, streamEnabled]);
+
+  useEffect(() => {
+    const syncVideoStats = () => {
+      if (shouldResetVideoStats({
+        streamEnabled,
+        cameraEnabled,
+        lastFrameAtMs: lastVideoFrameAtRef.current,
+        nowMs: Date.now(),
+      })) {
+        lastVideoFrameAtRef.current = null;
+        resetVideoStats();
+      }
+    };
+
+    syncVideoStats();
+    const intervalId = window.setInterval(syncVideoStats, 250);
+
+    return () => window.clearInterval(intervalId);
+  }, [streamEnabled, cameraEnabled]);
 
   // Draw detection bounding boxes on canvas
   const drawDetections = (ctx: CanvasRenderingContext2D, detections: DetectionFrame, canvasWidth: number, canvasHeight: number, overlay: boolean = true) => {
@@ -289,7 +371,8 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
   useEffect(() => {
     if (!socket || !streamEnabled) return;
 
-    const handleVideoFrame = (frame: Omit<JPEGVideoFrame, "data">, binaryData: ArrayBuffer | Uint8Array) => {
+    const handleVideoFrame = async (frame: Omit<JPEGVideoFrame, "data">, binaryData?: VideoFramePayload) => {
+      lastVideoFrameAtRef.current = Date.now();
       const receivedAt = performance.now();
       setStats((prev) => ({
         ...prev,
@@ -299,7 +382,9 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
       if (!canvasRef.current || !videoEnabled) return;
 
       try {
-        const jpegData = normalizeVideoBytes(binaryData);
+        const payload = binaryData ?? (frame as Partial<JPEGVideoFrame>).data;
+        const jpegData = await normalizeVideoBytes(payload);
+        assertJpegBytes(jpegData, frame.frame_id);
         bytesReceivedRef.current += jpegData.length;
 
         revokeActiveObjectUrl();
@@ -507,62 +592,76 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
     };
   }, [streamEnabled, audioEnabled]);
 
+  useEffect(() => {
+    audioMetricsRef.current.reset();
+    lastAudioStatsUpdateRef.current = 0;
+    lastAudioDebugLogRef.current = 0;
+    const observation = observeLongTasks(
+      audioDebugEnabledRef.current && streamEnabled && audioEnabled,
+      (durationMs) => audioMetricsRef.current.recordLongTask(durationMs),
+    );
+    audioMetricsRef.current.setLongTaskObserver(observation.status);
+    return observation.disconnect;
+  }, [streamEnabled, audioEnabled]);
+
   // Handle audio frames from Socket.IO
   useEffect(() => {
     if (!socket || !streamEnabled || !audioEnabled) return;
 
-    const handleAudioFrame = async (frame: AudioFrame) => {
-      setStats((prev) => ({
-        ...prev,
-        audio_frames_received: prev.audio_frames_received + 1,
+    const publishAudioMetrics = () => {
+      const monotonicNow = performance.now();
+      if (monotonicNow - lastAudioStatsUpdateRef.current < 1_000) return;
+
+      lastAudioStatsUpdateRef.current = monotonicNow;
+      const snapshot = audioMetricsRef.current.snapshot();
+      setStats((previous) => ({
+        ...previous,
+        audio_frames_received: snapshot.framesReceived,
+        audio_buffer_ms: snapshot.queueDurationMs,
       }));
 
+      if (
+        audioDebugEnabledRef.current &&
+        snapshot.capturedAtMs - lastAudioDebugLogRef.current >= 5_000
+      ) {
+        lastAudioDebugLogRef.current = snapshot.capturedAtMs;
+        const transport = socket.io.engine?.transport?.name ?? "unknown";
+        console.info("audio_stream_metrics", JSON.stringify({ ...snapshot, transport }));
+      }
+    };
+
+    const handleAudioFrame = (frame: AudioFrameEvent) => {
+      const receivedAt = performance.now();
+      let normalized: NormalizedAudioFrame;
+      try {
+        normalized = normalizeLegacyAudioFrame(frame);
+        audioMetricsRef.current.recordFrame(normalized, receivedAt, Date.now());
+      } catch {
+        audioMetricsRef.current.recordInvalidFrame();
+        publishAudioMetrics();
+        return;
+      }
+
       if (!audioContextRef.current) {
-        console.warn("AudioContext not initialized");
+        publishAudioMetrics();
         return;
       }
 
       try {
         const audioContext = audioContextRef.current;
-        const pcmData = new Uint8Array(frame.data);
-
-        // Log detailed frame info for debugging
-        if (stats.audio_frames_received < 5) {
-          console.log("Audio frame details:", {
-            frame_id: frame.frame_id,
-            timestamp: frame.timestamp,
-            sample_rate: frame.sample_rate,
-            channels: frame.channels,
-            format: frame.format,
-            data_bytes: pcmData.length,
-            first_10_bytes: Array.from(pcmData.slice(0, 10))
-          });
-        }
-
-        // Calculate number of samples (S16LE = 2 bytes per sample)
-        const totalSamples = pcmData.length / 2;
-        const samplesPerChannel = Math.floor(totalSamples / frame.channels);
-
-        if (samplesPerChannel <= 0) {
-          console.warn("Invalid audio frame: no samples");
-          return;
-        }
-
-        const durationMs = (samplesPerChannel / frame.sample_rate) * 1000;
-        if (stats.audio_frames_received < 5) {
-          console.log(`Calculated: ${samplesPerChannel} samples/channel, ${durationMs.toFixed(1)}ms duration`);
-        }
+        const pcmData = normalized.pcmBytes;
+        const samplesPerChannel = normalized.sampleCount / normalized.channels;
 
         // Create AudioBuffer at the source sample rate
         // The browser will handle resampling to the AudioContext rate
         const audioBuffer = audioContext.createBuffer(
-          frame.channels,
+          normalized.channels,
           samplesPerChannel,
-          frame.sample_rate
+          normalized.sampleRate
         );
 
         // Convert S16LE PCM to Float32 for each channel
-        if (frame.channels === 1) {
+        if (normalized.channels === 1) {
           // Mono audio - simpler processing
           const channelData = audioBuffer.getChannelData(0);
           for (let i = 0; i < samplesPerChannel; i++) {
@@ -581,12 +680,12 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
           }
         } else {
           // Stereo/multi-channel - interleaved data
-          for (let channel = 0; channel < frame.channels; channel++) {
+          for (let channel = 0; channel < normalized.channels; channel++) {
             const channelData = audioBuffer.getChannelData(channel);
 
             for (let i = 0; i < samplesPerChannel; i++) {
               // Interleaved: [L0, R0, L1, R1, ...]
-              const sampleIndex = i * frame.channels + channel;
+              const sampleIndex = i * normalized.channels + channel;
               const offset = sampleIndex * 2;
 
               const byte0 = pcmData[offset] ?? 0;
@@ -606,27 +705,34 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
           // Drop oldest buffer if queue is full to prevent excessive latency
           audioQueueRef.current.shift();
           audioQueueRef.current.push(audioBuffer);
-          console.warn("Audio queue full, dropping oldest buffer");
         }
-
-        // Update buffer stats
-        const bufferDuration = audioQueueRef.current.reduce((sum, buf) => sum + buf.duration, 0);
-        setStats(prev => ({
-          ...prev,
-          audio_buffer_ms: bufferDuration * 1000
-        }));
 
         // Start playback only if we have enough buffers to prevent underruns
         if (!isPlayingRef.current && audioQueueRef.current.length >= audioBufferThreshold.current) {
-          console.log(`🔊 Starting audio playback with ${audioQueueRef.current.length} buffers (${bufferDuration.toFixed(3)}s)`);
           isPlayingRef.current = true;
           // Initialize next play time with a small delay to build buffer
           nextPlayTimeRef.current = audioContext.currentTime + 0.1;
           scheduleNextAudioBuffer();
         }
 
-      } catch (error) {
-        console.error("Error processing audio frame:", error, frame);
+        const scheduledHorizonMs = Math.max(
+          0,
+          (nextPlayTimeRef.current - audioContext.currentTime) * 1_000,
+        );
+        const queuedDurationMs = audioQueueRef.current.reduce(
+          (sum, buffer) => sum + buffer.duration * 1_000,
+          0,
+        );
+        audioMetricsRef.current.recordPlayback(
+          audioQueueRef.current.length,
+          queuedDurationMs,
+          scheduledHorizonMs,
+        );
+        publishAudioMetrics();
+
+      } catch {
+        audioMetricsRef.current.recordInvalidFrame();
+        publishAudioMetrics();
       }
     };
 
@@ -641,7 +747,9 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
 
       // Check if we have buffers to play
       if (audioQueueRef.current.length === 0) {
-        console.warn("Audio buffer underrun - queue empty, stopping playback");
+        audioMetricsRef.current.recordUnderrun();
+        audioMetricsRef.current.recordPlayback(0, 0, 0);
+        publishAudioMetrics();
         isPlayingRef.current = false;
         // Reset timing for next playback start
         nextPlayTimeRef.current = 0;
@@ -675,7 +783,6 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
       // Detect large gaps in playback (>100ms)
       const gap = playTime - currentTime;
       if (gap > 0.1) {
-        console.warn(`Audio timing drift: ${(gap * 1000).toFixed(1)}ms ahead`);
         // Adjust to prevent excessive latency buildup
         nextPlayTimeRef.current = currentTime + 0.05;
       }
@@ -690,11 +797,6 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
           scheduleNextAudioBuffer();
         }
       }, Math.max(schedulingTime, 0));
-
-      // Log playback info periodically
-      if (Math.random() < 0.05) {
-        console.log(`Audio: ${audioBuffer.duration.toFixed(3)}s buffer, queue: ${audioQueueRef.current.length}, latency: ${(gap * 1000).toFixed(1)}ms`);
-      }
     };
 
     socket.on("audio_frame", handleAudioFrame);
@@ -766,6 +868,11 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
     setStreamEnabled(newState);
     streamDemandActiveRef.current = newState;
 
+    if (!newState) {
+      lastVideoFrameAtRef.current = null;
+      resetVideoStats();
+    }
+
     socket.emit("stream_control", {
       command: newState ? "start" : "stop",
       video_enabled: newState,
@@ -804,6 +911,11 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
 
     const newState = !cameraEnabled;
     setCameraEnabled(newState);
+
+    if (!newState) {
+      lastVideoFrameAtRef.current = null;
+      resetVideoStats();
+    }
 
     socket.emit("camera_control", {
       command: newState ? "start" : "stop"
@@ -952,6 +1064,7 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
                     onClick={toggleStream}
                     className="p-2 bg-white/10 hover:bg-white/20 rounded-lg backdrop-blur-md transition"
                     title={streamEnabled ? "Stop Stream" : "Start Stream"}
+                    data-testid="camera-stream-toggle"
                 >
                   {streamEnabled ? <Eye className="w-5 h-5" /> : <EyeOff className="w-5 h-5" />}
                 </button>
@@ -961,6 +1074,7 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
                     className="p-2 bg-white/10 hover:bg-white/20 rounded-lg backdrop-blur-md transition"
                     title={cameraEnabled ? "Turn Camera Off" : "Turn Camera On"}
                     disabled={!isConnected}
+                    data-testid="camera-power-toggle"
                 >
                   <Power className={`w-5 h-5 ${!cameraEnabled ? "text-red-400" : "text-green-400"}`} />
                 </button>
@@ -1084,27 +1198,30 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
             <div className="absolute bottom-4 left-4 flex items-end">
               {/* Stats panel */}
               {showStats && (
-                <div className="bg-black/40 backdrop-blur-sm border border-white/20 rounded-lg p-2 text-xs text-white shadow-lg">
+                <div
+                  className="bg-black/40 backdrop-blur-sm border border-white/20 rounded-lg p-2 text-xs text-white shadow-lg"
+                  data-testid="stream-stats-panel"
+                >
                   <div className="grid grid-cols-2 gap-x-3 gap-y-1">
                     {/* Video stats */}
                     <div className="flex items-center gap-1.5">
                       <Camera className="w-3 h-3 text-blue-400" />
                       <span className="text-gray-400">Video:</span>
                     </div>
-                    <span className="font-mono text-blue-300">{stats.video_fps.toFixed(1)} fps</span>
+                    <span className="font-mono text-blue-300" data-testid="camera-video-fps">{stats.video_fps.toFixed(1)} fps</span>
 
                     <span className="text-gray-400 col-start-1">Bitrate:</span>
-                    <span className="font-mono text-blue-300">{stats.video_bitrate_kbps.toFixed(0)} kbps</span>
+                    <span className="font-mono text-blue-300" data-testid="camera-video-bitrate">{stats.video_bitrate_kbps.toFixed(0)} kbps</span>
 
                     {/* Audio stats */}
                     <div className="flex items-center gap-1.5 col-start-1">
                       <Volume2 className="w-3 h-3 text-green-400" />
                       <span className="text-gray-400">Audio:</span>
                     </div>
-                    <span className="font-mono text-green-300">{stats.audio_frames_received} frames</span>
+                    <span className="font-mono text-green-300" data-testid="camera-audio-frames">{stats.audio_frames_received} frames</span>
 
                     <span className="text-gray-400 col-start-1">Buffer:</span>
-                    <span className="font-mono text-green-300">{stats.audio_buffer_ms.toFixed(0)} ms</span>
+                    <span className="font-mono text-green-300" data-testid="camera-audio-buffer">{stats.audio_buffer_ms.toFixed(0)} ms</span>
 
                     {/* Detection stats - only show when detections are active */}
                     {viewMode !== "camera" && (
