@@ -1,4 +1,5 @@
 import type { NormalizedAudioFrame } from "./audio-frame";
+import type { AudioTimelineDropReason } from "./audio-timeline-scheduler";
 
 export type LongTaskObserverStatus = "disabled" | "observing" | "unsupported";
 
@@ -21,6 +22,16 @@ export interface AudioStreamMetricsSnapshot {
   streamResets: number;
   futureTimestamps: number;
   underruns: number;
+  timelineResets: number;
+  scheduledFrames: number;
+  scheduleDrops: number;
+  duplicateDrops: number;
+  regressionDrops: number;
+  tooOldDrops: number;
+  horizonDrops: number;
+  suspendedDrops: number;
+  invalidScheduleDrops: number;
+  sourceErrors: number;
   longTasks: number;
   longTaskDurationMs: number;
   longTaskObserver: LongTaskObserverStatus;
@@ -111,6 +122,22 @@ export class AudioStreamMetrics {
   recordInvalidFrame(): void { this.counters.invalidFrames++; }
   recordDecoderDrop(): void { this.counters.decoderDrops++; }
   recordUnderrun(): void { this.counters.underruns++; }
+  recordTimelineReset(): void { this.counters.timelineResets++; }
+  recordScheduledFrame(): void { this.counters.scheduledFrames++; }
+
+  recordSchedulerDrop(reason: AudioTimelineDropReason): void {
+    this.counters.scheduleDrops++;
+    const counterByReason: Record<AudioTimelineDropReason, keyof typeof this.counters> = {
+      duplicate: "duplicateDrops",
+      regression: "regressionDrops",
+      "too-old": "tooOldDrops",
+      "horizon-overflow": "horizonDrops",
+      suspended: "suspendedDrops",
+      invalid: "invalidScheduleDrops",
+      "source-error": "sourceErrors",
+    };
+    this.counters[counterByReason[reason]]++;
+  }
 
   recordLongTask(durationMs: number): void {
     if (!Number.isFinite(durationMs) || durationMs < 0) return;
@@ -157,6 +184,10 @@ export class AudioStreamMetrics {
     return { framesReceived: 0, invalidFrames: 0, decoderDrops: 0,
       sequenceGaps: 0, duplicates: 0,
       regressions: 0, streamResets: 0, futureTimestamps: 0, underruns: 0,
+      timelineResets: 0, scheduledFrames: 0, scheduleDrops: 0,
+      duplicateDrops: 0, regressionDrops: 0, tooOldDrops: 0,
+      horizonDrops: 0, suspendedDrops: 0, invalidScheduleDrops: 0,
+      sourceErrors: 0,
       longTasks: 0, longTaskDurationMs: 0 };
   }
 }

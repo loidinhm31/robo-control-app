@@ -51,6 +51,11 @@ describe("AudioStreamMetrics", () => {
     metrics.recordPlayback(3, 150, 75);
     metrics.recordDecoderDrop();
     metrics.recordUnderrun();
+    metrics.recordTimelineReset();
+    metrics.recordScheduledFrame();
+    metrics.recordSchedulerDrop("horizon-overflow");
+    metrics.recordSchedulerDrop("too-old");
+    metrics.recordSchedulerDrop("source-error");
     metrics.recordLongTask(55);
     metrics.setLongTaskObserver("observing");
 
@@ -60,6 +65,12 @@ describe("AudioStreamMetrics", () => {
     expect(snapshot.queueDurationMs).toBe(150);
     expect(snapshot.scheduledHorizonMs.p95).toBe(75);
     expect(snapshot.underruns).toBe(1);
+    expect(snapshot.timelineResets).toBe(1);
+    expect(snapshot.scheduledFrames).toBe(1);
+    expect(snapshot.scheduleDrops).toBe(3);
+    expect(snapshot.horizonDrops).toBe(1);
+    expect(snapshot.tooOldDrops).toBe(1);
+    expect(snapshot.sourceErrors).toBe(1);
     expect(snapshot.decoderDrops).toBe(1);
     expect(snapshot.longTasks).toBe(1);
     expect(snapshot.longTaskDurationMs).toBe(55);

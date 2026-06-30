@@ -438,7 +438,7 @@ stateDiagram-v2
 - JPEG frames rendered on `<canvas>` via `Blob` + `createObjectURL`
 - Detection overlays with Canvas 2D API (bounding boxes, labels, confidence %)
 - Click-to-track: pixel coords → normalized bbox → find matching detection → emit `tracking_command`
-- Audio: S16LE PCM → Web Audio API `AudioBuffer` queue, 8kHz low-pass filter, max queue 20
+- Audio: S16LE PCM → ordered Blob normalization cap (4 frames) → bounded Web Audio timeline scheduler, 8kHz low-pass filter, explicit 10/50/150 ms lead bounds
 
 ### LocationMap — 2D Path Visualization
 

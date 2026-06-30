@@ -37,7 +37,7 @@ A responsive, real-time web and desktop control UI for the Robo-Fleet distribute
 - **Per-robot telemetry** — battery voltage, temperature, CPU load, network latency
 
 ### Voice Control
-- **Text-to-speech** — emit TTS commands, receive PCM audio responses, queue + play via Web Audio API
+- **Text-to-speech** — emit TTS commands, receive PCM audio responses, and play via a bounded Web Audio timeline
 - **Speech recognition** — microphone capture, send audio stream to backend STT service
 - **Transcription display** — show recognized commands with confidence and timestamp
 - **8kHz low-pass filter** — audio quality optimization for remote environments

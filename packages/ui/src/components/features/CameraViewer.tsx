@@ -1,4 +1,4 @@
-import {useEffect, useRef, useState} from "react";
+import {useCallback, useEffect, useRef, useState} from "react";
 import {
   Activity,
   Camera,
@@ -21,18 +21,14 @@ import {
   XCircle
 } from "lucide-react";
 import {Socket} from "socket.io-client";
-import type {AudioBinaryPayload, AudioFrameEvent, DetectionFrame, TrackingTelemetry, WebTrackingCommand} from "@robo-fleet/shared/types";
+import type {DetectionFrame, TrackingTelemetry, WebTrackingCommand} from "@robo-fleet/shared/types";
 import {getClassColor} from "@robo-fleet/shared/constants";
 import {
-  AudioStreamMetrics,
-  normalizeAudioFrame,
-  observeLongTasks,
   shouldResetVideoStats,
 } from "../../lib";
-import type {NormalizedAudioFrame} from "../../lib";
+import {useAudioStream} from "../../hooks";
 
 type ViewMode = "camera" | "camera_with_detections" | "detections_only";
-const MAX_PENDING_AUDIO_DECODES = 4;
 
 interface JPEGVideoFrame {
   timestamp: number;
@@ -52,6 +48,7 @@ interface StreamStats {
   video_bitrate_kbps: number;
   audio_frames_received: number;
   audio_buffer_ms: number;
+  audio_context_state: string;
   detections_received: number;
   detection_fps: number;
   total_objects_detected: number;
@@ -93,6 +90,7 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
     video_bitrate_kbps: 0,
     audio_frames_received: 0,
     audio_buffer_ms: 0,
+    audio_context_state: "uninitialized",
     detections_received: 0,
     detection_fps: 0,
     total_objects_detected: 0,
@@ -115,23 +113,21 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
   const streamDemandActiveRef = useRef(false);
   const lastVideoFrameAtRef = useRef<number | null>(null);
 
-  // Audio playback references
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const audioQueueRef = useRef<AudioBuffer[]>([]);
-  const nextPlayTimeRef = useRef<number>(0);
-  const isPlayingRef = useRef<boolean>(false);
-  const audioBufferThreshold = useRef<number>(5); // Minimum buffers before starting playback (increased for stability)
-  const lowPassFilterRef = useRef<BiquadFilterNode | null>(null);
-  const gainNodeRef = useRef<GainNode | null>(null);
-  const maxBufferQueueSize = useRef<number>(20); // Max queue size to prevent excessive latency
-  const audioMetricsRef = useRef(new AudioStreamMetrics());
-  const lastAudioStatsUpdateRef = useRef(0);
-  const lastAudioDebugLogRef = useRef(0);
-  const audioDebugEnabledRef = useRef(
+  const audioDebugEnabled = (
     Boolean((import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV) &&
       typeof window !== "undefined" &&
-      new URLSearchParams(window.location.search).get("audioDebug") === "1",
+      new URLSearchParams(window.location.search).get("audioDebug") === "1"
   );
+  const {
+    activate: activateAudio,
+    reset: resetAudio,
+    contextState: audioContextState,
+    metrics: audioMetrics,
+  } = useAudioStream({
+    socket,
+    enabled: streamEnabled && audioEnabled,
+    debugEnabled: audioDebugEnabled,
+  });
 
   const revokeActiveObjectUrl = () => {
     if (activeObjectUrlRef.current) {
@@ -245,8 +241,10 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
     return () => window.clearInterval(intervalId);
   }, [streamEnabled, cameraEnabled]);
 
+  const trackedTargetId = trackingTelemetry?.target?.tracking_id;
+
   // Draw detection bounding boxes on canvas
-  const drawDetections = (ctx: CanvasRenderingContext2D, detections: DetectionFrame, canvasWidth: number, canvasHeight: number, overlay: boolean = true) => {
+  const drawDetections = useCallback((ctx: CanvasRenderingContext2D, detections: DetectionFrame, canvasWidth: number, canvasHeight: number, overlay: boolean = true) => {
     detections.detections.forEach((detection) => {
       const { bbox, class_name, confidence, tracking_id } = detection;
 
@@ -259,7 +257,7 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
       const height = y2 - y1;
 
       // Check if this is the currently tracked object
-      const isTracked = trackingTelemetry?.target?.tracking_id === tracking_id;
+      const isTracked = trackedTargetId === tracking_id;
       const hasTrackingId = tracking_id !== undefined;
 
       // Get color for this class
@@ -329,10 +327,10 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
       ctx.fillStyle = isTracked ? "#000000" : "#000000";
       ctx.fillText(label, x1 + padding, y1 - padding);
     });
-  };
+  }, [trackedTargetId]);
 
   // Draw detections-only view (clean background with bounding boxes)
-  const drawDetectionsOnly = (ctx: CanvasRenderingContext2D, detections: DetectionFrame, canvasWidth: number, canvasHeight: number) => {
+  const drawDetectionsOnly = useCallback((ctx: CanvasRenderingContext2D, detections: DetectionFrame, canvasWidth: number, canvasHeight: number) => {
     // Clear canvas with dark background
     ctx.fillStyle = "#1a1a1a";
     ctx.fillRect(0, 0, canvasWidth, canvasHeight);
@@ -366,7 +364,7 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
 
     // Draw detections
     drawDetections(ctx, detections, canvasWidth, canvasHeight, false);
-  };
+  }, [drawDetections]);
 
   // Handle video frames from Socket.IO
   useEffect(() => {
@@ -542,302 +540,16 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
     return () => {
       socket.off("video_frame", handleVideoFrame);
     };
-  }, [socket, streamEnabled, videoEnabled, viewMode, latestDetections, trackedDetections, trackingTelemetry]);
-
-  // Initialize Audio Context
-  useEffect(() => {
-    if (!streamEnabled || !audioEnabled) return;
-
-    // Create AudioContext on first use (must be after user interaction)
-    if (!audioContextRef.current) {
-      try {
-        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
-
-        // Create gain node for volume control
-        gainNodeRef.current = audioContextRef.current.createGain();
-        gainNodeRef.current.gain.value = 1.0;
-
-        // Create low-pass filter to reduce high-frequency noise
-        // This helps with resampling artifacts and microphone noise
-        lowPassFilterRef.current = audioContextRef.current.createBiquadFilter();
-        lowPassFilterRef.current.type = 'lowpass';
-        lowPassFilterRef.current.frequency.value = 8000; // Cut off above 8kHz
-        lowPassFilterRef.current.Q.value = 0.7; // Gentle slope
-
-        // Connect audio chain: source -> gain -> filter -> destination
-        gainNodeRef.current.connect(lowPassFilterRef.current);
-        lowPassFilterRef.current.connect(audioContextRef.current.destination);
-
-        console.log("AudioContext initialized:", {
-          sampleRate: audioContextRef.current.sampleRate,
-          state: audioContextRef.current.state,
-          lowPassFilter: {
-            frequency: lowPassFilterRef.current.frequency.value,
-            type: lowPassFilterRef.current.type
-          }
-        });
-      } catch (error) {
-        console.error("❌ Failed to create AudioContext:", error);
-      }
-    }
-
-    // Resume audio context if suspended (browser autoplay policy)
-    if (audioContextRef.current?.state === "suspended") {
-      audioContextRef.current.resume().then(() => {
-        console.log("AudioContext resumed");
-      });
-    }
-
-    return () => {
-      // Don't close AudioContext on cleanup - keep it for next enable
-    };
-  }, [streamEnabled, audioEnabled]);
+  }, [socket, streamEnabled, videoEnabled, viewMode, latestDetections, trackedDetections, drawDetections, drawDetectionsOnly]);
 
   useEffect(() => {
-    audioMetricsRef.current.reset();
-    lastAudioStatsUpdateRef.current = 0;
-    lastAudioDebugLogRef.current = 0;
-    const observation = observeLongTasks(
-      audioDebugEnabledRef.current && streamEnabled && audioEnabled,
-      (durationMs) => audioMetricsRef.current.recordLongTask(durationMs),
-    );
-    audioMetricsRef.current.setLongTaskObserver(observation.status);
-    return observation.disconnect;
-  }, [streamEnabled, audioEnabled]);
-
-  // Handle audio frames from Socket.IO
-  useEffect(() => {
-    if (!socket || !streamEnabled || !audioEnabled) return;
-
-    const publishAudioMetrics = () => {
-      const monotonicNow = performance.now();
-      if (monotonicNow - lastAudioStatsUpdateRef.current < 1_000) return;
-
-      lastAudioStatsUpdateRef.current = monotonicNow;
-      const snapshot = audioMetricsRef.current.snapshot();
-      setStats((previous) => ({
-        ...previous,
-        audio_frames_received: snapshot.framesReceived,
-        audio_buffer_ms: snapshot.queueDurationMs,
-      }));
-
-      if (
-        audioDebugEnabledRef.current &&
-        snapshot.capturedAtMs - lastAudioDebugLogRef.current >= 5_000
-      ) {
-        lastAudioDebugLogRef.current = snapshot.capturedAtMs;
-        const transport = socket.io.engine?.transport?.name ?? "unknown";
-        console.info("audio_stream_metrics", JSON.stringify({ ...snapshot, transport }));
-      }
-    };
-
-    let active = true;
-
-    const processAudioFrame = async (
-      frame: AudioFrameEvent,
-      binaryData?: AudioBinaryPayload,
-    ) => {
-      const receivedAt = performance.now();
-      let normalized: NormalizedAudioFrame;
-      try {
-        normalized = await normalizeAudioFrame(frame, binaryData);
-        if (!active) return;
-        audioMetricsRef.current.recordFrame(normalized, receivedAt, Date.now());
-      } catch {
-        audioMetricsRef.current.recordInvalidFrame();
-        publishAudioMetrics();
-        return;
-      }
-
-      if (!audioContextRef.current) {
-        publishAudioMetrics();
-        return;
-      }
-
-      try {
-        const audioContext = audioContextRef.current;
-        const pcmData = normalized.pcmBytes;
-        const samplesPerChannel = normalized.sampleCount / normalized.channels;
-
-        // Create AudioBuffer at the source sample rate
-        // The browser will handle resampling to the AudioContext rate
-        const audioBuffer = audioContext.createBuffer(
-          normalized.channels,
-          samplesPerChannel,
-          normalized.sampleRate
-        );
-
-        // Convert S16LE PCM to Float32 for each channel
-        if (normalized.channels === 1) {
-          // Mono audio - simpler processing
-          const channelData = audioBuffer.getChannelData(0);
-          for (let i = 0; i < samplesPerChannel; i++) {
-            const offset = i * 2;
-            const byte0 = pcmData[offset] ?? 0;
-            const byte1 = pcmData[offset + 1] ?? 0;
-
-            // Combine bytes to 16-bit little-endian
-            const sample = byte0 | (byte1 << 8);
-
-            // Convert unsigned to signed
-            const signedSample = sample > 32767 ? sample - 65536 : sample;
-
-            // Normalize to [-1.0, 1.0]
-            channelData[i] = signedSample / 32768.0;
-          }
-        } else {
-          // Stereo/multi-channel - interleaved data
-          for (let channel = 0; channel < normalized.channels; channel++) {
-            const channelData = audioBuffer.getChannelData(channel);
-
-            for (let i = 0; i < samplesPerChannel; i++) {
-              // Interleaved: [L0, R0, L1, R1, ...]
-              const sampleIndex = i * normalized.channels + channel;
-              const offset = sampleIndex * 2;
-
-              const byte0 = pcmData[offset] ?? 0;
-              const byte1 = pcmData[offset + 1] ?? 0;
-
-              const sample = byte0 | (byte1 << 8);
-              const signedSample = sample > 32767 ? sample - 65536 : sample;
-              channelData[i] = signedSample / 32768.0;
-            }
-          }
-        }
-
-        // Queue audio buffer for playback (with max queue size limit)
-        if (audioQueueRef.current.length < maxBufferQueueSize.current) {
-          audioQueueRef.current.push(audioBuffer);
-        } else {
-          // Drop oldest buffer if queue is full to prevent excessive latency
-          audioQueueRef.current.shift();
-          audioQueueRef.current.push(audioBuffer);
-        }
-
-        // Start playback only if we have enough buffers to prevent underruns
-        if (!isPlayingRef.current && audioQueueRef.current.length >= audioBufferThreshold.current) {
-          isPlayingRef.current = true;
-          // Initialize next play time with a small delay to build buffer
-          nextPlayTimeRef.current = audioContext.currentTime + 0.1;
-          scheduleNextAudioBuffer();
-        }
-
-        const scheduledHorizonMs = Math.max(
-          0,
-          (nextPlayTimeRef.current - audioContext.currentTime) * 1_000,
-        );
-        const queuedDurationMs = audioQueueRef.current.reduce(
-          (sum, buffer) => sum + buffer.duration * 1_000,
-          0,
-        );
-        audioMetricsRef.current.recordPlayback(
-          audioQueueRef.current.length,
-          queuedDurationMs,
-          scheduledHorizonMs,
-        );
-        publishAudioMetrics();
-
-      } catch {
-        audioMetricsRef.current.recordInvalidFrame();
-        publishAudioMetrics();
-      }
-    };
-
-    let audioFrameSequence = Promise.resolve();
-    let pendingAudioDecodes = 0;
-    const handleAudioFrame = (frame: AudioFrameEvent, binaryData?: AudioBinaryPayload) => {
-      if (pendingAudioDecodes >= MAX_PENDING_AUDIO_DECODES) {
-        audioMetricsRef.current.recordDecoderDrop();
-        publishAudioMetrics();
-        return;
-      }
-      pendingAudioDecodes++;
-      audioFrameSequence = audioFrameSequence
-        .then(() => processAudioFrame(frame, binaryData))
-        .catch(() => {
-          if (!active) return;
-          audioMetricsRef.current.recordInvalidFrame();
-          publishAudioMetrics();
-        })
-        .finally(() => {
-          pendingAudioDecodes = Math.max(0, pendingAudioDecodes - 1);
-        });
-    };
-
-    // Schedule and play audio buffers from queue
-    const scheduleNextAudioBuffer = () => {
-      if (!audioContextRef.current || !gainNodeRef.current) {
-        isPlayingRef.current = false;
-        return;
-      }
-
-      const audioContext = audioContextRef.current;
-
-      // Check if we have buffers to play
-      if (audioQueueRef.current.length === 0) {
-        audioMetricsRef.current.recordUnderrun();
-        audioMetricsRef.current.recordPlayback(0, 0, 0);
-        publishAudioMetrics();
-        isPlayingRef.current = false;
-        // Reset timing for next playback start
-        nextPlayTimeRef.current = 0;
-        return;
-      }
-
-      const audioBuffer = audioQueueRef.current.shift();
-
-      if (!audioBuffer) {
-        isPlayingRef.current = false;
-        return;
-      }
-
-      // Create buffer source
-      const source = audioContext.createBufferSource();
-      source.buffer = audioBuffer;
-
-      // Connect through gain node (which connects to filter -> destination)
-      source.connect(gainNodeRef.current);
-
-      // Schedule playback with seamless timing
-      const currentTime = audioContext.currentTime;
-
-      // Sync timing: if we're behind, catch up gradually
-      if (nextPlayTimeRef.current < currentTime) {
-        nextPlayTimeRef.current = currentTime;
-      }
-
-      const playTime = nextPlayTimeRef.current;
-
-      // Detect large gaps in playback (>100ms)
-      const gap = playTime - currentTime;
-      if (gap > 0.1) {
-        // Adjust to prevent excessive latency buildup
-        nextPlayTimeRef.current = currentTime + 0.05;
-      }
-
-      source.start(playTime);
-      nextPlayTimeRef.current = playTime + audioBuffer.duration;
-
-      // Schedule next buffer slightly before this one ends to ensure continuity
-      const schedulingTime = (audioBuffer.duration * 1000) - 10; // 10ms before end
-      setTimeout(() => {
-        if (isPlayingRef.current) {
-          scheduleNextAudioBuffer();
-        }
-      }, Math.max(schedulingTime, 0));
-    };
-
-    socket.on("audio_frame", handleAudioFrame);
-
-    return () => {
-      active = false;
-      socket.off("audio_frame", handleAudioFrame);
-
-      // Clear audio queue on cleanup
-      audioQueueRef.current = [];
-      isPlayingRef.current = false;
-    };
-  }, [socket, streamEnabled, audioEnabled]);
+    setStats((previous) => ({
+      ...previous,
+      audio_frames_received: audioMetrics.framesReceived,
+      audio_buffer_ms: audioMetrics.queueDurationMs,
+      audio_context_state: audioContextState,
+    }));
+  }, [audioContextState, audioMetrics]);
 
   // Handle detection frames from Socket.IO
   useEffect(() => {
@@ -894,6 +606,8 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
     if (!socket) return;
 
     const newState = !streamEnabled;
+    if (newState && audioEnabled) void activateAudio();
+    if (!newState) resetAudio();
     setStreamEnabled(newState);
     streamDemandActiveRef.current = newState;
 
@@ -920,17 +634,13 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
     if (!socket) return;
 
     const newState = !audioEnabled;
+    if (newState && streamEnabled) void activateAudio();
+    if (!newState) resetAudio();
     setAudioEnabled(newState);
 
     socket.emit("audio_control", {
       command: newState ? "start" : "stop"
     });
-
-    if (!newState) {
-      // Clear audio queue when disabling
-      audioQueueRef.current = [];
-      isPlayingRef.current = false;
-    }
 
     console.log(newState ? "Audio enabled" : "Audio disabled");
   };
@@ -1251,6 +961,14 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
 
                     <span className="text-gray-400 col-start-1">Buffer:</span>
                     <span className="font-mono text-green-300" data-testid="camera-audio-buffer">{stats.audio_buffer_ms.toFixed(0)} ms</span>
+
+                    <span className="text-gray-400 col-start-1">Audio state:</span>
+                    <span
+                      className={stats.audio_context_state === "running" ? "font-mono text-green-300" : "font-mono text-yellow-300"}
+                      data-testid="camera-audio-state"
+                    >
+                      {stats.audio_context_state}
+                    </span>
 
                     {/* Detection stats - only show when detections are active */}
                     {viewMode !== "camera" && (

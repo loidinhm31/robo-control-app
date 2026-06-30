@@ -1,6 +1,7 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import type { RoverTelemetry } from "@robo-fleet/shared/types";
 import { RotateCcw, ZoomIn, ZoomOut } from "lucide-react";
+import { startAnimationFrameLoop } from "../../lib";
 
 interface RobotLocationMapProps {
   telemetry: RoverTelemetry | null;
@@ -13,6 +14,9 @@ interface PathPoint {
   y: number;
   timestamp: number;
 }
+
+const MAX_PATH_LENGTH = 500;
+const ROBOT_SIZE = 0.3;
 
 export const RobotLocationMap: React.FC<RobotLocationMapProps> = ({
                                                                     telemetry,
@@ -28,9 +32,6 @@ export const RobotLocationMap: React.FC<RobotLocationMapProps> = ({
   const [showGrid, setShowGrid] = useState(true);
   const [showPath, setShowPath] = useState(true);
   const [showNavSensors, setShowNavSensors] = useState(true);
-
-  const MAX_PATH_LENGTH = 500;
-  const ROBOT_SIZE = 0.3; // meters
 
   // Add new position to path history
   useEffect(() => {
@@ -50,7 +51,7 @@ export const RobotLocationMap: React.FC<RobotLocationMapProps> = ({
   }, [telemetry?.position, telemetry?.timestamp]);
 
   // Drawing functions
-  const drawGrid = (ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement) => {
+  const drawGrid = useCallback((ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement) => {
     if (!showGrid) return;
 
     const centerX = canvas.width / 2 + offset.x;
@@ -117,9 +118,9 @@ export const RobotLocationMap: React.FC<RobotLocationMapProps> = ({
     ctx.beginPath();
     ctx.arc(centerX, centerY, 4, 0, Math.PI * 2);
     ctx.fill();
-  };
+  }, [offset, scale, showGrid]);
 
-  const drawPath = (ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement) => {
+  const drawPath = useCallback((ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement) => {
     if (!showPath || pathHistory.length < 2) return;
 
     const centerX = canvas.width / 2 + offset.x;
@@ -154,9 +155,9 @@ export const RobotLocationMap: React.FC<RobotLocationMapProps> = ({
         ctx.fill();
       }
     });
-  };
+  }, [offset, pathHistory, scale, showPath]);
 
-  const drawNavigationSensors = (
+  const drawNavigationSensors = useCallback((
     ctx: CanvasRenderingContext2D,
     _canvas: HTMLCanvasElement,
     robotX: number,
@@ -191,9 +192,9 @@ export const RobotLocationMap: React.FC<RobotLocationMapProps> = ({
       ctx.arc(endX, endY, 4, 0, Math.PI * 2);
       ctx.fill();
     });
-  };
+  }, [scale, showNavSensors, telemetry]);
 
-  const drawRobot = (ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement) => {
+  const drawRobot = useCallback((ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement) => {
     if (!telemetry) return;
 
     const centerX = canvas.width / 2 + offset.x;
@@ -268,9 +269,9 @@ export const RobotLocationMap: React.FC<RobotLocationMapProps> = ({
       ctx.fill();
       ctx.restore();
     }
-  };
+  }, [drawNavigationSensors, offset, scale, telemetry]);
 
-  const draw = () => {
+  const draw = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
@@ -285,7 +286,7 @@ export const RobotLocationMap: React.FC<RobotLocationMapProps> = ({
     drawGrid(ctx, canvas);
     drawPath(ctx, canvas);
     drawRobot(ctx, canvas);
-  };
+  }, [drawGrid, drawPath, drawRobot]);
 
   // Animation loop
   useEffect(() => {
@@ -296,15 +297,8 @@ export const RobotLocationMap: React.FC<RobotLocationMapProps> = ({
     canvas.width = canvas.offsetWidth;
     canvas.height = canvas.offsetHeight;
 
-    const animate = () => {
-      draw();
-      requestAnimationFrame(animate);
-    };
-
-    const animationId = requestAnimationFrame(animate);
-
-    return () => cancelAnimationFrame(animationId);
-  }, [telemetry, pathHistory, scale, offset, showGrid, showPath, showNavSensors]);
+    return startAnimationFrameLoop(draw);
+  }, [draw]);
 
   // Mouse interaction handlers
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {

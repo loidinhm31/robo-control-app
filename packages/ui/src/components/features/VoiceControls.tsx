@@ -420,7 +420,7 @@ export const VoiceControls: React.FC<VoiceControlsProps> = ({
 
         {/* Help Text */}
         <div className="text-xs text-white/40 space-y-1">
-          <p>• <strong>Voice Commands:</strong> Say "move forward", "turn left", "track person", etc.</p>
+          <p>• <strong>Voice Commands:</strong> Say &quot;move forward&quot;, &quot;turn left&quot;, &quot;track person&quot;, etc.</p>
           <p>• <strong>Walkie-Talkie:</strong> Direct audio streaming for communication</p>
           <p>• <strong>TTS:</strong> Type text for rover to speak</p>
         </div>

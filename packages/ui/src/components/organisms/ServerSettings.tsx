@@ -220,7 +220,7 @@ export const ServerSettings: React.FC<ServerSettingsProps> = ({
           </div>
 
           <p className="text-xs font-mono text-slate-600">
-            // credentials: localStorage | token: sessionStorage
+            {"// credentials: localStorage | token: sessionStorage"}
           </p>
 
           <Popover.Arrow className="fill-slate-700" />

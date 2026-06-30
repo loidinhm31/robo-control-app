@@ -687,7 +687,7 @@ export const RoboRoverControl: React.FC<RoboRoverControlProps> = ({
                   <Suspense
                     fallback={
                       <div className="h-96 flex items-center justify-center text-slate-500 font-mono text-sm">
-                        // loading map...
+                        {"// loading map..."}
                       </div>
                     }
                   >
@@ -695,7 +695,7 @@ export const RoboRoverControl: React.FC<RoboRoverControlProps> = ({
                   </Suspense>
                 </div>
                 <div className="mt-3 text-xs text-slate-500 text-center font-mono">
-                  // mouse: rotate | scroll: zoom | drag: pan
+                  {"// mouse: rotate | scroll: zoom | drag: pan"}
                 </div>
                 <div className="mt-3 grid grid-cols-3 gap-2 text-xs font-mono">
                   <div className="bg-slate-900/70 border border-slate-700 p-2 rounded">
@@ -739,7 +739,7 @@ export const RoboRoverControl: React.FC<RoboRoverControlProps> = ({
                 <Eye className="w-4 h-4" />
                 <span className="text-syntax-purple">show</span>
                 <span className="text-slate-500">(</span>
-                <span className="text-syntax-orange">"location_map"</span>
+                <span className="text-syntax-orange">&quot;location_map&quot;</span>
                 <span className="text-slate-500">)</span>
               </button>
             )}
@@ -752,7 +752,7 @@ export const RoboRoverControl: React.FC<RoboRoverControlProps> = ({
                 <Camera className="w-4 h-4" />
                 <span className="text-syntax-cyan">show</span>
                 <span className="text-slate-500">(</span>
-                <span className="text-syntax-orange">"camera_feed"</span>
+                <span className="text-syntax-orange">&quot;camera_feed&quot;</span>
                 <span className="text-slate-500">)</span>
               </button>
             )}
@@ -803,7 +803,7 @@ export const RoboRoverControl: React.FC<RoboRoverControlProps> = ({
                   </div>
 
                   <div className="text-slate-400 text-center font-mono text-xs">
-                    // drag joystick to move
+                    {"// drag joystick to move"}
                   </div>
                 </div>
 
@@ -887,7 +887,7 @@ export const RoboRoverControl: React.FC<RoboRoverControlProps> = ({
           >
             {logs.length === 0 ? (
               <div className="text-slate-600 text-center py-8">
-                // no logs yet
+                {"// no logs yet"}
               </div>
             ) : (
               logs.slice(0, 10).map((log, idx) => (

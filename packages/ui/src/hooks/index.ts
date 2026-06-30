@@ -31,3 +31,8 @@ export {
   type UseMetricColorOptions,
   type UseMetricColorReturn,
 } from "./useMetricColor";
+
+export {
+  useAudioStream,
+  type UseAudioStreamReturn,
+} from "./use-audio-stream";
