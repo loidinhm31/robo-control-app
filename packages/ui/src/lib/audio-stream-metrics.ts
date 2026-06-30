@@ -14,6 +14,7 @@ export interface AudioStreamMetricsSnapshot {
   streamId: string | null;
   framesReceived: number;
   invalidFrames: number;
+  decoderDrops: number;
   sequenceGaps: number;
   duplicates: number;
   regressions: number;
@@ -108,6 +109,7 @@ export class AudioStreamMetrics {
   }
 
   recordInvalidFrame(): void { this.counters.invalidFrames++; }
+  recordDecoderDrop(): void { this.counters.decoderDrops++; }
   recordUnderrun(): void { this.counters.underruns++; }
 
   recordLongTask(durationMs: number): void {
@@ -152,7 +154,8 @@ export class AudioStreamMetrics {
   }
 
   private emptyCounters() {
-    return { framesReceived: 0, invalidFrames: 0, sequenceGaps: 0, duplicates: 0,
+    return { framesReceived: 0, invalidFrames: 0, decoderDrops: 0,
+      sequenceGaps: 0, duplicates: 0,
       regressions: 0, streamResets: 0, futureTimestamps: 0, underruns: 0,
       longTasks: 0, longTaskDurationMs: 0 };
   }

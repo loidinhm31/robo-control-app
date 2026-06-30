@@ -21,17 +21,18 @@ import {
   XCircle
 } from "lucide-react";
 import {Socket} from "socket.io-client";
-import type {AudioFrameEvent, DetectionFrame, TrackingTelemetry, WebTrackingCommand} from "@robo-fleet/shared/types";
+import type {AudioBinaryPayload, AudioFrameEvent, DetectionFrame, TrackingTelemetry, WebTrackingCommand} from "@robo-fleet/shared/types";
 import {getClassColor} from "@robo-fleet/shared/constants";
 import {
   AudioStreamMetrics,
-  normalizeLegacyAudioFrame,
+  normalizeAudioFrame,
   observeLongTasks,
   shouldResetVideoStats,
 } from "../../lib";
 import type {NormalizedAudioFrame} from "../../lib";
 
 type ViewMode = "camera" | "camera_with_detections" | "detections_only";
+const MAX_PENDING_AUDIO_DECODES = 4;
 
 interface JPEGVideoFrame {
   timestamp: number;
@@ -630,11 +631,17 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
       }
     };
 
-    const handleAudioFrame = (frame: AudioFrameEvent) => {
+    let active = true;
+
+    const processAudioFrame = async (
+      frame: AudioFrameEvent,
+      binaryData?: AudioBinaryPayload,
+    ) => {
       const receivedAt = performance.now();
       let normalized: NormalizedAudioFrame;
       try {
-        normalized = normalizeLegacyAudioFrame(frame);
+        normalized = await normalizeAudioFrame(frame, binaryData);
+        if (!active) return;
         audioMetricsRef.current.recordFrame(normalized, receivedAt, Date.now());
       } catch {
         audioMetricsRef.current.recordInvalidFrame();
@@ -736,6 +743,27 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
       }
     };
 
+    let audioFrameSequence = Promise.resolve();
+    let pendingAudioDecodes = 0;
+    const handleAudioFrame = (frame: AudioFrameEvent, binaryData?: AudioBinaryPayload) => {
+      if (pendingAudioDecodes >= MAX_PENDING_AUDIO_DECODES) {
+        audioMetricsRef.current.recordDecoderDrop();
+        publishAudioMetrics();
+        return;
+      }
+      pendingAudioDecodes++;
+      audioFrameSequence = audioFrameSequence
+        .then(() => processAudioFrame(frame, binaryData))
+        .catch(() => {
+          if (!active) return;
+          audioMetricsRef.current.recordInvalidFrame();
+          publishAudioMetrics();
+        })
+        .finally(() => {
+          pendingAudioDecodes = Math.max(0, pendingAudioDecodes - 1);
+        });
+    };
+
     // Schedule and play audio buffers from queue
     const scheduleNextAudioBuffer = () => {
       if (!audioContextRef.current || !gainNodeRef.current) {
@@ -802,6 +830,7 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
     socket.on("audio_frame", handleAudioFrame);
 
     return () => {
+      active = false;
       socket.off("audio_frame", handleAudioFrame);
 
       // Clear audio queue on cleanup

@@ -1,5 +1,5 @@
 export { cn } from "./utils";
-export { normalizeLegacyAudioFrame } from "./audio-frame";
+export { normalizeAudioFrame, normalizeLegacyAudioFrame } from "./audio-frame";
 export type { NormalizedAudioFrame } from "./audio-frame";
 export { AudioStreamMetrics } from "./audio-stream-metrics";
 export type { AudioStreamMetricsSnapshot, LongTaskObserverStatus } from "./audio-stream-metrics";

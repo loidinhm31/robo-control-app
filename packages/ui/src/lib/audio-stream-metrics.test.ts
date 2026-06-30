@@ -45,10 +45,11 @@ describe("AudioStreamMetrics", () => {
     expect(snapshot.streamResets).toBe(1);
   });
 
-  it("records playback, underrun, long-task, and future-clock evidence", () => {
+  it("records playback, decoder drops, underrun, long-task, and future-clock evidence", () => {
     const metrics = new AudioStreamMetrics();
     metrics.recordFrame(frame(0), 0, 900);
     metrics.recordPlayback(3, 150, 75);
+    metrics.recordDecoderDrop();
     metrics.recordUnderrun();
     metrics.recordLongTask(55);
     metrics.setLongTaskObserver("observing");
@@ -59,6 +60,7 @@ describe("AudioStreamMetrics", () => {
     expect(snapshot.queueDurationMs).toBe(150);
     expect(snapshot.scheduledHorizonMs.p95).toBe(75);
     expect(snapshot.underruns).toBe(1);
+    expect(snapshot.decoderDrops).toBe(1);
     expect(snapshot.longTasks).toBe(1);
     expect(snapshot.longTaskDurationMs).toBe(55);
     expect(snapshot.longTaskObserver).toBe("observing");
@@ -73,6 +75,7 @@ describe("AudioStreamMetrics", () => {
     const snapshot = metrics.snapshot();
     expect(snapshot.framesReceived).toBe(0);
     expect(snapshot.invalidFrames).toBe(0);
+    expect(snapshot.decoderDrops).toBe(0);
     expect(snapshot.ageMs.samples).toBe(0);
     expect(snapshot.streamId).toBeNull();
   });

@@ -46,7 +46,9 @@ export type {
   ClientToServerEvents,
   AuthErrorReason,
   AuthErrorEvent,
+  AudioBinaryPayload,
   AudioFrameEvent,
+  BrowserAudioFrameMetadata,
   LegacyAudioFrameEvent,
   OriginAudioFrameEvent,
 } from "./socket";

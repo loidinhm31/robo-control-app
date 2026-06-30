@@ -1,9 +1,10 @@
-import type { AudioFrameEvent } from "@robo-fleet/shared/types";
+import type { AudioBinaryPayload, AudioFrameEvent } from "@robo-fleet/shared/types";
 
 const MIN_SAMPLE_RATE = 8_000;
 const MAX_SAMPLE_RATE = 192_000;
 const MAX_CHANNELS = 8;
 const MAX_DURATION_MS = 1_000;
+const DURATION_TOLERANCE_MS = 0.5;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export interface NormalizedAudioFrame {
@@ -28,6 +29,13 @@ const safeInteger = (value: unknown, field: string): number => {
   return value as number;
 };
 
+const finiteNumber = (value: unknown, field: string): number => {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    throw new Error(`${field} must be a non-negative finite number`);
+  }
+  return value;
+};
+
 const optionalString = (value: unknown, field: string): string | undefined => {
   if (value === undefined || value === null) return undefined;
   if (typeof value !== "string" || value.length === 0 || value.length > 128) {
@@ -36,7 +44,7 @@ const optionalString = (value: unknown, field: string): string | undefined => {
   return value;
 };
 
-const normalizeBytes = (value: unknown, maximumBytes: number): Uint8Array => {
+const normalizeNumberArray = (value: unknown, maximumBytes: number): Uint8Array => {
   if (!Array.isArray(value) || value.length === 0) {
     throw new Error("audio data must be a non-empty byte array");
   }
@@ -47,6 +55,35 @@ const normalizeBytes = (value: unknown, maximumBytes: number): Uint8Array => {
     }
   }
   return Uint8Array.from(value);
+};
+
+const normalizeBinaryBytes = async (
+  value: AudioBinaryPayload,
+  maximumBytes: number,
+): Promise<Uint8Array> => {
+  if (value === undefined || value === null) {
+    throw new Error("missing audio binary attachment");
+  }
+  if (typeof Blob !== "undefined" && value instanceof Blob) {
+    if (value.size === 0) throw new Error("audio data must not be empty");
+    if (value.size > maximumBytes) throw new Error("audio data exceeds maximum frame size");
+    return new Uint8Array(await value.arrayBuffer());
+  }
+  if (value instanceof ArrayBuffer) {
+    if (value.byteLength === 0) throw new Error("audio data must not be empty");
+    if (value.byteLength > maximumBytes) {
+      throw new Error("audio data exceeds maximum frame size");
+    }
+    return new Uint8Array(value);
+  }
+  if (ArrayBuffer.isView(value)) {
+    if (value.byteLength === 0) throw new Error("audio data must not be empty");
+    if (value.byteLength > maximumBytes) {
+      throw new Error("audio data exceeds maximum frame size");
+    }
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  }
+  return normalizeNumberArray(value, maximumBytes);
 };
 
 export const normalizeLegacyAudioFrame = (
@@ -70,7 +107,7 @@ export const normalizeLegacyAudioFrame = (
   if (input.format !== "s16le") throw new Error(`unsupported format: ${String(input.format)}`);
 
   const maximumBytes = sampleRate * channels * 2 * MAX_DURATION_MS / 1_000;
-  const pcmBytes = normalizeBytes(input.data, maximumBytes);
+  const pcmBytes = normalizeNumberArray(input.data, maximumBytes);
   if (pcmBytes.byteLength % 2 !== 0) throw new Error("s16le payload length must be even");
   const derivedSampleCount = pcmBytes.byteLength / 2;
   const sampleCount = input.sample_count === undefined
@@ -86,6 +123,71 @@ export const normalizeLegacyAudioFrame = (
 
   const streamId = optionalString(input.stream_id, "stream_id");
   if (streamId !== undefined && !UUID_PATTERN.test(streamId)) {
+    throw new Error("stream_id must be a UUID");
+  }
+
+  return {
+    streamId,
+    entityId: optionalString(input.entity_id, "entity_id"),
+    frameId,
+    captureTimestampMs,
+    sampleRate,
+    channels,
+    sampleCount,
+    durationMs,
+    pcmBytes,
+  };
+};
+
+export const normalizeAudioFrame = async (
+  input: AudioFrameEvent | unknown,
+  binaryData?: AudioBinaryPayload,
+): Promise<NormalizedAudioFrame> => {
+  if (binaryData === undefined && (!isRecord(input) || !("protocol_version" in input))) {
+    return normalizeLegacyAudioFrame(input);
+  }
+  if (!isRecord(input)) throw new Error("audio frame metadata must be an object");
+  if (input.protocol_version !== 1) {
+    throw new Error(`unsupported audio protocol_version: ${String(input.protocol_version)}`);
+  }
+  if ("data" in input && input.data !== undefined) {
+    throw new Error("binary audio metadata must not contain data");
+  }
+
+  const frameId = safeInteger(input.frame_id, "frame_id");
+  safeInteger(input.timestamp, "timestamp");
+  const captureTimestampMs = safeInteger(input.capture_timestamp_ms, "capture_timestamp_ms");
+  const sampleRate = safeInteger(input.sample_rate, "sample_rate");
+  const channels = safeInteger(input.channels, "channels");
+  const sampleCount = safeInteger(input.sample_count, "sample_count");
+  if (sampleRate < MIN_SAMPLE_RATE || sampleRate > MAX_SAMPLE_RATE) {
+    throw new Error(`unsupported sample_rate: ${sampleRate}`);
+  }
+  if (channels < 1 || channels > MAX_CHANNELS) {
+    throw new Error(`unsupported channels: ${channels}`);
+  }
+  if (sampleCount === 0 || sampleCount % channels !== 0) {
+    throw new Error("sample_count must contain complete interleaved channel frames");
+  }
+  if (input.format !== "s16le") throw new Error(`unsupported format: ${String(input.format)}`);
+
+  const expectedBytes = sampleCount * 2;
+  const maximumBytes = sampleRate * channels * 2 * MAX_DURATION_MS / 1_000;
+  if (!Number.isSafeInteger(expectedBytes) || expectedBytes > maximumBytes) {
+    throw new Error("audio frame exceeds maximum duration");
+  }
+  const pcmBytes = await normalizeBinaryBytes(binaryData, maximumBytes);
+  if (pcmBytes.byteLength !== expectedBytes) {
+    throw new Error("sample_count does not match binary payload");
+  }
+
+  const durationMs = sampleCount * 1_000 / (sampleRate * channels);
+  const declaredDurationMs = finiteNumber(input.duration_ms, "duration_ms");
+  if (Math.abs(declaredDurationMs - durationMs) > DURATION_TOLERANCE_MS) {
+    throw new Error("duration_ms does not match sample dimensions");
+  }
+  const streamId = optionalString(input.stream_id, "stream_id");
+  if (streamId === undefined || !UUID_PATTERN.test(streamId)) {
     throw new Error("stream_id must be a UUID");
   }
 

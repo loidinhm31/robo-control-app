@@ -33,11 +33,37 @@ export interface OriginAudioFrameEvent extends LegacyAudioFrameEvent {
   entity_id?: string | null;
 }
 
-export type AudioFrameEvent = LegacyAudioFrameEvent | OriginAudioFrameEvent;
+export interface BrowserAudioFrameMetadata {
+  protocol_version: 1;
+  timestamp: number;
+  capture_timestamp_ms: number;
+  stream_id: string;
+  frame_id: number;
+  sample_rate: number;
+  channels: number;
+  sample_count: number;
+  duration_ms: number;
+  format: "s16le";
+  entity_id?: string | null;
+  data?: never;
+}
+
+export type AudioBinaryPayload =
+  | ArrayBuffer
+  | ArrayBufferView
+  | Blob
+  | number[]
+  | null
+  | undefined;
+
+export type AudioFrameEvent =
+  | LegacyAudioFrameEvent
+  | OriginAudioFrameEvent
+  | BrowserAudioFrameMetadata;
 
 export interface ServerToClientEvents {
   video_frame: (frame: Omit<VideoFrame, "data">, data: ArrayBuffer | Uint8Array) => void;
-  audio_frame: (frame: AudioFrameEvent) => void;
+  audio_frame: (frame: AudioFrameEvent, binaryData?: AudioBinaryPayload) => void;
   detections: (frame: DetectionFrame) => void;
   tracked_detections: (frame: DetectionFrame) => void;
   tracking_telemetry: (telemetry: TrackingTelemetry) => void;
