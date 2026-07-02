@@ -45,13 +45,15 @@ export const TranscriptionDisplay: React.FC<TranscriptionDisplayProps> = ({
     }
   }, [transcription, maxHistory]);
 
-  const getConfidenceColor = (confidence: number) => {
+  const getConfidenceColor = (confidence: number | null | undefined) => {
+    if (confidence == null) return "text-slate-500";
     if (confidence >= 0.8) return "text-green-400";
     if (confidence >= 0.6) return "text-yellow-400";
     return "text-orange-400";
   };
 
-  const getConfidenceBadge = (confidence: number) => {
+  const getConfidenceBadge = (confidence: number | null | undefined) => {
+    if (confidence == null) return "bg-slate-500/20 text-slate-400";
     if (confidence >= 0.8) return "bg-green-500/20 text-green-400";
     if (confidence >= 0.6) return "bg-yellow-500/20 text-yellow-400";
     return "bg-orange-500/20 text-orange-400";
@@ -126,11 +128,13 @@ export const TranscriptionDisplay: React.FC<TranscriptionDisplayProps> = ({
             {transcription.text}
           </p>
           <div className="flex items-center gap-1.5 text-[10px]">
-            <span
-              className={`px-1 py-0.5 rounded text-[10px] font-bold ${getConfidenceBadge(transcription.confidence)}`}
-            >
-              {(transcription.confidence * 100).toFixed(0)}%
-            </span>
+            {transcription.confidence != null && (
+              <span
+                className={`px-1 py-0.5 rounded text-[10px] font-bold ${getConfidenceBadge(transcription.confidence)}`}
+              >
+                {(transcription.confidence * 100).toFixed(0)}%
+              </span>
+            )}
             <span className="text-slate-500">
               {new Date(transcription.timestamp).toLocaleTimeString([], {
                 hour: "2-digit",
@@ -160,11 +164,13 @@ export const TranscriptionDisplay: React.FC<TranscriptionDisplayProps> = ({
                 {item.text}
               </p>
               <div className="flex items-center gap-1.5">
-                <span
-                  className={`text-[10px] font-bold ${getConfidenceColor(item.confidence)}`}
-                >
-                  {(item.confidence * 100).toFixed(0)}%
-                </span>
+                {item.confidence != null && (
+                  <span
+                    className={`text-[10px] font-bold ${getConfidenceColor(item.confidence)}`}
+                  >
+                    {(item.confidence * 100).toFixed(0)}%
+                  </span>
+                )}
                 <span className="text-[10px] text-slate-600">
                   {new Date(item.timestamp).toLocaleTimeString([], {
                     hour: "2-digit",

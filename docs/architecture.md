@@ -303,6 +303,8 @@ flowchart LR
         VF["video_frame"]
         TD["tracked_detections"]
         TR["transcription"]
+        VCT["voice_command_transcription"]
+        SS["stt_status"]
     end
 
     subgraph Control
@@ -314,7 +316,7 @@ flowchart LR
     classDef media fill:#1e293b,stroke:#a855f7,color:#f1f5f9
     classDef ctrl fill:#1e293b,stroke:#3b82f6,color:#f1f5f9
     class RCT,AT,ST,PM tele
-    class VF,TD,TR media
+    class VF,TD,TR,VCT,SS media
     class CA,FS ctrl
 ```
 
@@ -329,9 +331,20 @@ flowchart LR
 | `audio_control` | `{ command: "start" \| "stop" }` | VoiceControls |
 | `tts_command` | `{ text: string }` | VoiceControls |
 | `audio_stream` | Raw audio chunks | Microphone capture |
+| `voice_command_control` | browser voice stream lifecycle (`start` / `stop`) | Voice Commands |
+| `voice_command_audio` | browser microphone Float32 frames with stream metadata | Voice Commands |
 | `stream_control` | `{ command: "start" \| "stop", video_enabled, target_fps }` | CameraViewer demand control |
 
 `video_frame` is delivered as a Socket.IO binary event: the first callback argument is frame metadata (`timestamp`, `capture_timestamp_ms`, `frame_id`, dimensions, `codec`) and the second argument is the JPEG bytes as `ArrayBuffer | Uint8Array`. The browser does not handle legacy JSON byte arrays.
+
+### STT Source Split
+
+- Phase 01 defines the future wire contract. It does not complete the transport split.
+- `voice_command_transcription` is the reserved browser-private final-text event for the Phase 04/06 cutover.
+- `transcription` is still the only live STT event in the current runtime. After the cutover it becomes the rover-origin transcript surface for authenticated fleet clients.
+- `stt_status` is the reserved global backend state event (`loading`, `ready`, `error`) plus the startup-selected profile.
+- `target_entity_id` is assigned by the backend from authoritative fleet state at browser stream start after the transport cutover. The Phase 01 baseline still falls back to the current `SELECTED_ENTITY_ID`.
+- `SpeechTranscription.confidence` is optional. UI must omit percentage rendering when confidence is `null` or absent.
 
 ## Type System
 
@@ -387,8 +400,11 @@ classDiagram
 
     class SpeechTranscription {
         text: string
-        confidence: number
-        duration: number
+        confidence: number | null
+        source_kind: "browser" | "rover"
+        entity_id: string | null
+        target_entity_id: string
+        profile: "en-vad-offline" | "vi-vad-offline"
     }
 
     WebRoverCommand ..> RoverTelemetry : controls
@@ -467,6 +483,8 @@ flowchart TB
     RRC -->|fleetStatus, performanceMetrics| FS["FleetSelector"]
     RRC -->|jointPositions| JCP["JointControlPanel"]
     RRC -->|transcription| TD["TranscriptionDisplay"]
+    RRC -->|voice_command_transcription| VC["VoiceControls"]
+    RRC -->|stt_status| VC
 
     classDef root fill:#3b82f6,stroke:#60a5fa,color:#f1f5f9
     classDef child fill:#1e293b,stroke:#94a3b8,color:#f1f5f9
@@ -481,7 +499,9 @@ Key state:
 - `servoTelemetry: TrackingTelemetry | null` — tracking state, control output
 - `performanceMetrics: Map<string, SystemMetrics>` — per-entity metrics
 - `fleetStatus: FleetStatus | null` — selected rover, roster
-- `transcription: SpeechTranscription | null` — latest transcription
+- `transcription: SpeechTranscription | null` — latest rover transcription
+- `voiceCommandTranscription: SpeechTranscription | null` — latest browser-private voice command result
+- `sttStatus: SttStatus | null` — authoritative backend profile/state/error
 - `jointPositions: ExtendedJointPositions` — current slider values
 - `roverVelocity: { v_x, v_y, omega_z }` — joystick output
 - `logs: LogEntry[]` — event log (max 50 entries)

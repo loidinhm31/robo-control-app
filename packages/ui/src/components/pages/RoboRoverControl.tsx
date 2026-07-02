@@ -282,7 +282,9 @@ export const RoboRoverControl: React.FC<RoboRoverControlProps> = ({
 
     socket.on("transcription", (data: SpeechTranscription) => {
       setTranscription(data);
-      addLog(`Transcription: "${data.text}" (${(data.confidence * 100).toFixed(0)}%)`, "info");
+      const confidenceLabel =
+        data.confidence == null ? "no confidence" : `${(data.confidence * 100).toFixed(0)}%`;
+      addLog(`Transcription: "${data.text}" (${confidenceLabel})`, "info");
     });
 
     socket.on("performance_metrics", (data: SystemMetrics) => {

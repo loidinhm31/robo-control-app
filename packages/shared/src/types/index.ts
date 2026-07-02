@@ -32,7 +32,16 @@ export type {
 } from "./tracking";
 
 // Voice
-export type { SpeechTranscription, SpeechStats } from "./voice";
+export type {
+  SpeechTranscription,
+  SpeechStats,
+  SttProfile,
+  SttSourceKind,
+  SttState,
+  SttStatus,
+  VoiceCommandAudioFrame,
+  VoiceCommandControl,
+} from "./voice";
 
 // Performance
 export type { NodeMetrics, SystemMetrics } from "./performance";
