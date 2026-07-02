@@ -263,9 +263,13 @@ describe("useAudioStream lifecycle", () => {
     await act(async () => {
       await delayed.release();
     });
+    // Frames 0-3 all process after the delayed Blob resolves. With the
+    // horizon-overflow reset fix, frames 2-3 are scheduled (with timeline
+    // resets) instead of dropped, so all 4 create sources.
     await waitFor(() => {
-      expect(FakeAudioContext.instances[0]?.sources).toHaveLength(2);
+      expect(FakeAudioContext.instances[0]?.sources).toHaveLength(4);
     });
+    // Delayed frame 0 schedules first at target lead, frame 1 follows.
     const starts = FakeAudioContext.instances[0]?.sources.map((source) => source.starts[0]);
     expect(starts?.[0]).toBeCloseTo(10.05);
     expect(starts?.[1]).toBeCloseTo(10.1);
@@ -303,6 +307,86 @@ describe("useAudioStream lifecycle", () => {
       await flushFrames();
     });
     expect(result.current.metrics.framesReceived).toBe(3);
+    unmount();
+  });
+
+  it("self-heals a suspended AudioContext on frame arrival", async () => {
+    vi.spyOn(performance, "now").mockReturnValue(1_000);
+    const socket = new FakeSocket();
+    const typedSocket = socket as unknown as Socket;
+    const { result, rerender, unmount } = renderHook<UseAudioStreamReturn, { enabled: boolean }>(
+      ({ enabled }) => useAudioStream({ socket: typedSocket, enabled }),
+      { initialProps: { enabled: false } },
+    );
+
+    await act(async () => { await result.current.activate(); });
+    const context = FakeAudioContext.instances[0]!;
+    expect(context.resumeCount).toBe(1);
+
+    rerender({ enabled: true });
+
+    // Simulate the browser suspending the AudioContext (e.g. system audio
+    // policy change) WITHOUT the user re-clicking activate.
+    act(() => context.suspendFromBrowser());
+    expect(context.state).toBe("suspended");
+
+    // A frame arrives while suspended — self-healing resume() should
+    // recover the context and schedule the frame instead of dropping it.
+    await act(async () => {
+      socket.dispatch("audio_frame", audioFrame(0));
+      await flushFrames();
+    });
+
+    expect(context.resumeCount).toBeGreaterThanOrEqual(2);
+    expect(result.current.metrics.suspendedDrops).toBe(0);
+    expect(context.sources[0]?.starts).toEqual([10.05]);
+
+    unmount();
+  });
+
+  it("is immune to clock skew between rover and browser", async () => {
+    vi.spyOn(performance, "now").mockReturnValue(1_000);
+    // Simulate the rover clock being 30 seconds behind the browser.
+    // Without clock-offset correction, ageMs = 30000 > 1000 → "too-old" drop.
+    const browserNow = Date.now();
+    const roverNow = browserNow - 30_000;
+    vi.spyOn(Date, "now").mockReturnValue(browserNow);
+
+    const socket = new FakeSocket();
+    const typedSocket = socket as unknown as Socket;
+    const { result, rerender, unmount } = renderHook<UseAudioStreamReturn, { enabled: boolean }>(
+      ({ enabled }) => useAudioStream({ socket: typedSocket, enabled }),
+      { initialProps: { enabled: false } },
+    );
+
+    await act(async () => { await result.current.activate(); });
+    rerender({ enabled: true });
+
+    // Use a metadata object with the ROVER's timestamp (30s behind browser).
+    const skewedMetadata = {
+      protocol_version: 1 as const,
+      timestamp: roverNow,
+      capture_timestamp_ms: roverNow,
+      stream_id: "550e8400-e29b-41d4-a716-446655440000",
+      frame_id: 0,
+      sample_rate: 16_000,
+      channels: 1,
+      sample_count: 800,
+      duration_ms: 50,
+      format: "s16le" as const,
+    };
+
+    await act(async () => {
+      socket.dispatch("audio_frame", skewedMetadata, new Blob([new Uint8Array(1_600)]));
+      await flushFrames();
+    });
+
+    // Frame should be scheduled despite 30s clock skew.
+    expect(result.current.metrics.scheduledFrames).toBe(1);
+    expect(result.current.metrics.tooOldDrops).toBe(0);
+    expect(result.current.metrics.suspendedDrops).toBe(0);
+    expect(FakeAudioContext.instances[0]?.sources[0]?.starts).toEqual([10.05]);
+
     unmount();
   });
 });

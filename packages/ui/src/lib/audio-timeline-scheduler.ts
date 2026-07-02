@@ -117,9 +117,18 @@ export class AudioTimelineScheduler<TBuffer extends AudioTimelineBuffer> {
       timelineReset = true;
       underrun = true;
     }
-    const endTime = startTime + frame.buffer.duration;
+    let endTime = startTime + frame.buffer.duration;
     if (endTime - now > this.maximumHorizonSeconds + HORIZON_EPSILON_SECONDS) {
-      return this.dropped("horizon-overflow", now, timelineReset, underrun);
+      // Timeline drifted too far ahead (clock drift between
+      // AudioContext.currentTime and wall-clock, or burst arrival). Reset to
+      // target lead and schedule this frame instead of dropping it — dropping
+      // would cause an audio gap and a death-spiral where nextEndSeconds stays
+      // elevated and every subsequent frame also overflows until real time
+      // catches up (~100-150ms of silence).
+      this.clearSources();
+      startTime = now + this.targetLeadSeconds;
+      timelineReset = true;
+      endTime = startTime + frame.buffer.duration;
     }
 
     let source: AudioTimelineSource | null = null;

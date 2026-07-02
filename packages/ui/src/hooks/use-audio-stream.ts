@@ -52,6 +52,9 @@ export const useAudioStream = ({
   const metricsRef = useRef(new AudioStreamMetrics());
   const lastMetricsPublishRef = useRef(0);
   const lastDebugLogRef = useRef(0);
+  const clockOffsetRef = useRef<number | null>(null);
+  const clockOffsetStreamIdRef = useRef<string | null>(null);
+  const firstDropWarnedRef = useRef(false);
   const [contextState, setContextState] = useState<AudioPlaybackState>("uninitialized");
   const [metrics, setMetrics] = useState(() => metricsRef.current.snapshot());
   const [volume, setVolumeState] = useState(1);
@@ -127,6 +130,9 @@ export const useAudioStream = ({
     metricsRef.current.reset();
     lastMetricsPublishRef.current = 0;
     lastDebugLogRef.current = 0;
+    clockOffsetRef.current = null;
+    clockOffsetStreamIdRef.current = null;
+    firstDropWarnedRef.current = false;
     setMetrics(metricsRef.current.snapshot());
   }, []);
 
@@ -162,6 +168,9 @@ export const useAudioStream = ({
     let active = true;
     let pendingDecodes = 0;
     let frameSequence = Promise.resolve();
+    clockOffsetRef.current = null;
+    clockOffsetStreamIdRef.current = null;
+    firstDropWarnedRef.current = false;
 
     const processFrame = async (frame: AudioFrameEvent, binary?: AudioBinaryPayload): Promise<void> => {
       const receivedAt = performance.now();
@@ -171,17 +180,53 @@ export const useAudioStream = ({
         metricsRef.current.recordFrame(normalized, receivedAt, Date.now());
         const context = contextRef.current;
         const scheduler = schedulerRef.current;
-        if (!context || !scheduler || context.state !== "running") {
+        if (!context || !scheduler) {
           metricsRef.current.recordSchedulerDrop("suspended");
           metricsRef.current.recordPlayback(0, 0, 0);
           publishMetrics();
           return;
         }
+        // Self-healing: browser autoplay policy starts AudioContext suspended.
+        // Attempt resume() on each frame — browsers permit this once the tab
+        // has been user-activated (any prior click), even without a fresh
+        // gesture in the call stack. Recovers from a stale activate() or a
+        // browser-initiated suspend without dropping the frame.
+        if (context.state === "suspended") {
+          try {
+            await context.resume();
+          } catch {
+            // resume() rejected (e.g. context closed) — fall through to drop
+          }
+        }
+        // After a potential resume, re-check state. The onstatechange handler
+        // may not have fired yet (DOM events are queued as tasks), so
+        // explicitly un-suspend the scheduler to avoid a false "suspended" drop.
+        if (context.state !== "running") {
+          metricsRef.current.recordSchedulerDrop("suspended");
+          metricsRef.current.recordPlayback(0, 0, 0);
+          publishMetrics();
+          return;
+        }
+        scheduler.resume();
+
+        // Clock-skew-immune age: establish an offset from the first frame of
+        // each stream, then compute age relative to that offset. Without this,
+        // a rover clock >1s behind the browser causes every frame's wall-clock
+        // age to exceed maximumFrameAgeMs (1000ms) → all dropped as "too-old".
+        const streamKey = normalized.streamId ?? `legacy:${normalized.entityId ?? "unknown"}`;
+        if (clockOffsetRef.current === null || clockOffsetStreamIdRef.current !== streamKey) {
+          clockOffsetRef.current = Date.now() - normalized.captureTimestampMs;
+          clockOffsetStreamIdRef.current = streamKey;
+        }
+        const adjustedAgeMs = Math.max(
+          0,
+          (Date.now() - normalized.captureTimestampMs) - clockOffsetRef.current,
+        );
 
         const result = scheduler.push({
-          streamId: normalized.streamId ?? `legacy:${normalized.entityId ?? "unknown"}`,
+          streamId: streamKey,
           frameId: normalized.frameId,
-          ageMs: Math.max(0, Date.now() - normalized.captureTimestampMs),
+          ageMs: adjustedAgeMs,
           buffer: {
             duration: normalized.durationMs / 1_000,
             frame: normalized,
@@ -189,8 +234,21 @@ export const useAudioStream = ({
         });
         if (result.timelineReset) metricsRef.current.recordTimelineReset();
         if (result.underrun) metricsRef.current.recordUnderrun();
-        if (result.status === "scheduled") metricsRef.current.recordScheduledFrame();
-        else if (result.reason) metricsRef.current.recordSchedulerDrop(result.reason);
+        if (result.status === "scheduled") {
+          metricsRef.current.recordScheduledFrame();
+        } else if (result.reason) {
+          metricsRef.current.recordSchedulerDrop(result.reason);
+          if (!firstDropWarnedRef.current) {
+            firstDropWarnedRef.current = true;
+            console.warn("[audio] scheduler dropped frame:", result.reason, {
+              frameId: normalized.frameId,
+              ageMs: adjustedAgeMs,
+              streamId: streamKey,
+              contextState: context.state,
+              durationMs: normalized.durationMs,
+            });
+          }
+        }
         metricsRef.current.recordPlayback(result.activeSources, result.horizonMs, result.horizonMs);
       } catch {
         metricsRef.current.recordInvalidFrame();

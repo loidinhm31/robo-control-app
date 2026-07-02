@@ -49,6 +49,8 @@ interface StreamStats {
   audio_frames_received: number;
   audio_buffer_ms: number;
   audio_context_state: string;
+  audio_scheduled: number;
+  audio_dropped: number;
   detections_received: number;
   detection_fps: number;
   total_objects_detected: number;
@@ -91,6 +93,8 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
     audio_frames_received: 0,
     audio_buffer_ms: 0,
     audio_context_state: "uninitialized",
+    audio_scheduled: 0,
+    audio_dropped: 0,
     detections_received: 0,
     detection_fps: 0,
     total_objects_detected: 0,
@@ -548,6 +552,8 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
       audio_frames_received: audioMetrics.framesReceived,
       audio_buffer_ms: audioMetrics.queueDurationMs,
       audio_context_state: audioContextState,
+      audio_scheduled: audioMetrics.scheduledFrames,
+      audio_dropped: audioMetrics.scheduleDrops,
     }));
   }, [audioContextState, audioMetrics]);
 
@@ -969,6 +975,12 @@ export const CameraViewer: React.FC<CameraViewerProps> = ({
                     >
                       {stats.audio_context_state}
                     </span>
+
+                    <span className="text-gray-400 col-start-1">Scheduled:</span>
+                    <span className="font-mono text-green-300" data-testid="camera-audio-scheduled">{stats.audio_scheduled} frames</span>
+
+                    <span className="text-gray-400 col-start-1">Dropped:</span>
+                    <span className={stats.audio_dropped > 0 ? "font-mono text-red-300" : "font-mono text-green-300"} data-testid="camera-audio-dropped">{stats.audio_dropped} frames</span>
 
                     {/* Detection stats - only show when detections are active */}
                     {viewMode !== "camera" && (

@@ -82,16 +82,33 @@ describe("AudioTimelineScheduler", () => {
     expect(maximumSources).toBeLessThanOrEqual(2);
   });
 
-  it("drops incoming burst frames beyond the 150 ms end horizon", () => {
-    const { scheduler, setNow } = setup();
+  it("resets timeline instead of dropping burst frames beyond the 150 ms horizon", () => {
+    const { scheduler, sources, setNow } = setup();
     setNow(10);
     expect(scheduler.push(frame(0)).status).toBe("scheduled");
     expect(scheduler.push(frame(1)).status).toBe("scheduled");
-    expect(scheduler.push(frame(2))).toMatchObject({
-      status: "dropped",
-      reason: "horizon-overflow",
-      activeSources: 2,
+    // 3rd frame overflows 150ms horizon — scheduler resets to target lead
+    // and schedules it instead of dropping (prevents death-spiral).
+    const result = scheduler.push(frame(2));
+    expect(result).toMatchObject({
+      status: "scheduled",
+      timelineReset: true,
+      activeSources: 1,
     });
+    expect(sources[0]?.stopCount).toBe(1);
+    expect(sources[1]?.stopCount).toBe(1);
+  });
+
+  it("prevents horizon-overflow death-spiral after timeline reset", () => {
+    const { scheduler, setNow } = setup();
+    setNow(10);
+    scheduler.push(frame(0));
+    scheduler.push(frame(1));
+    // 3rd frame overflows → resets and schedules (not drops).
+    expect(scheduler.push(frame(2)).status).toBe("scheduled");
+    // Advance time by one frame. Next frame schedules normally — no death-spiral.
+    setNow(10.05);
+    expect(scheduler.push(frame(3)).status).toBe("scheduled");
   });
 
   it("restarts at target lead after a one-second scheduling stall", () => {
