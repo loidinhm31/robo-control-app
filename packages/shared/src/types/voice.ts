@@ -54,7 +54,7 @@ export interface SpeechStats {
   failed_transcriptions: number;
 }
 
-if (false) {
+function verifyVoiceContracts(): void {
   const browserFixture = {
     text: "move forward",
     confidence: null,
@@ -109,3 +109,5 @@ if (false) {
 
   void [browserFixture, roverFixture, readyStatus, startControl, audioFrame];
 }
+
+void verifyVoiceContracts;

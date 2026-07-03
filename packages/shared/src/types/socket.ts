@@ -67,6 +67,9 @@ export type AudioFrameEvent =
   | BrowserAudioFrameMetadata;
 
 export interface ServerToClientEvents {
+  auth_token: (token: string) => void;
+  auth_error: (event: AuthErrorEvent) => void;
+  command_ack: () => void;
   video_frame: (frame: Omit<VideoFrame, "data">, data: ArrayBuffer | Uint8Array) => void;
   audio_frame: (frame: AudioFrameEvent, binaryData?: AudioBinaryPayload) => void;
   detections: (frame: DetectionFrame) => void;
@@ -82,6 +85,7 @@ export interface ServerToClientEvents {
 }
 
 export interface ClientToServerEvents {
+  auth_refresh: (request: { token: string }) => void;
   arm_command: (command: WebArmCommand) => void;
   rover_command: (command: WebRoverCommand) => void;
   tracking_command: (command: WebTrackingCommand) => void;

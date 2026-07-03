@@ -86,9 +86,9 @@ robo-control-app/
 ### Features (Full Features)
 - `CameraViewer` — Live JPEG streaming + detection overlays + click-to-track
 - `LocationMap` — 2D canvas rover path visualization
-- `VoiceControls` — TTS playback + microphone input + Web Audio scheduling
+- `VoiceControls` — Manual TTS, walkie-talkie controls, browser-private voice command capture, authoritative STT status/profile display
 - `FloatingMetrics` — Floating performance metrics panel
-- `TranscriptionDisplay` — Speech recognition text + confidence
+- `TranscriptionDisplay` — Fleet rover transcription history with rover badge, profile/language metadata, and null-safe confidence
 
 ### Pages
 - `RoboRoverControl` — Main controller page (self-contained state + Socket.IO)
@@ -97,8 +97,9 @@ robo-control-app/
 ## Key Files by Domain
 
 ### Socket.IO & Communication
-- `src/types/socket.ts` — Typed event maps (sent/received)
-- `src/components/pages/RoboRoverControl.tsx` — Socket.IO connection setup, event listeners
+- `packages/shared/src/types/socket.ts` — Typed event maps, including `stt_status`, `voice_command_transcription`, `auth_error`, and `command_ack`
+- `packages/shared/src/types/voice.ts` — Shared STT/voice contract types and compile-time fixture verification
+- `packages/ui/src/components/pages/RoboRoverControl.tsx` — Socket.IO connection setup, browser-private vs rover-public transcription state, status replay handling
 
 ### Commands & Telemetry
 - `src/types/commands.ts` — WebRoverCommand, WebArmCommand, TrackingCommand
@@ -115,7 +116,8 @@ robo-control-app/
 - `src/types/index.ts` — Re-exports all types for convenience
 
 ### Hooks
-- `src/hooks/index.ts` — Custom React hooks (likely useConnection, useTelemetry, etc.)
+- `packages/ui/src/hooks/use-browser-voice-capture.ts` — Browser STT transport lifecycle, frame batching, and exact-once stop/cleanup
+- `src/hooks/index.ts` — Legacy/root-level custom hooks
 
 ### Services (Pattern B — extensible, not yet active)
 - `src/services/` — Service factory interfaces, could include:
@@ -140,7 +142,9 @@ const [armTelemetry, setArmTelemetry] = useState<ArmTelemetry | null>(null)
 const [roverTelemetry, setRoverTelemetry] = useState<RoverTelemetry | null>(null)
 
 // Speech
-const [transcription, setTranscription] = useState<SpeechTranscription | null>(null)
+const [browserVoiceHistory, setBrowserVoiceHistory] = useState<SpeechTranscription[]>([])
+const [roverTranscriptionHistory, setRoverTranscriptionHistory] = useState<SpeechTranscription[]>([])
+const [sttStatus, setSttStatus] = useState<SttStatus | null>(null)
 
 // Fleet
 const [fleetStatus, setFleetStatus] = useState<FleetStatus | null>(null)
@@ -163,12 +167,13 @@ State flows down as props to feature/organism components.
 - `ArmTelemetry` — { servoPositions, loads, temperatures, ... }
 - `TrackingTelemetry` — { detections: [{ bbox, className, confidence }, ...] }
 - `SystemMetrics` — { commandLatency, fps, memoryUsage, cpuLoad }
-- `SpeechTranscription` — { text, confidence, timestamp, isFinal }
+- `SpeechTranscription` — Source-aware final transcription with profile/language, stream identity, authoritative rover targeting, and optional confidence
+- `SttStatus` — Backend readiness state, startup profile, language, timestamp, and sanitized error text
 - `FleetStatus` — { rovers: [{ id, health, status, battery }, ...] }
 
-**Socket.IO event types** (`src/types/socket.ts`):
-- Receive: video_frame, tracked_detections, servo_telemetry, rover_core_telemetry, arm_telemetry, transcription, performance_metrics, fleet_status, command_ack
-- Emit: rover_command, arm_command, tracking_command, fleet_select, audio_control, tts_command, audio_stream
+**Socket.IO event types** (`packages/shared/src/types/socket.ts`):
+- Receive: video_frame, tracked_detections, servo_telemetry, rover_core_telemetry, arm_telemetry, transcription, voice_command_transcription, stt_status, performance_metrics, fleet_status, command_ack, auth_error
+- Emit: rover_command, arm_command, tracking_command, fleet_select, audio_control, tts_command, audio_stream, voice_command_control, voice_command_audio, stt_status_request
 
 ## Dependencies
 
@@ -272,28 +277,31 @@ socketService.emit('rover_command', { ... });
 - Socket.IO connection lifecycle (connect, disconnect, reconnect handlers)
 - Command throttle: useRef<number> timestamp tracking, 100ms minimum between emits
 - State aggregation: All telemetry/metrics collected, distributed via props
+- Source-aware speech handling: private browser history is cleared on disconnect/auth errors, rover history remains fleet-scoped, and cached `stt_status` is restored after reconnect
 
 ### LocationMap (449 LOC)
 - Canvas 2D path visualization, 50ms wheel kinematics integration loop
 - Zoom/pan controls: requestAnimationFrame animation loop
 - Coordinate transforms: world space → canvas space (scale, offset, rotation)
 
-### VoiceControls (432 LOC)
-- TTS: Binary PCM audio frames → Web Audio API AudioBuffer queue
-- STT: MediaRecorder → BLOB → emit audio_stream event
-- Audio scheduling: setInterval-driven queue drain, sample-rate conversion
+### VoiceControls + Voice Hooks
+- Manual TTS: Binary PCM audio frames → Web Audio API AudioBuffer queue
+- Browser voice commands: `use-browser-voice-capture` emits exact-once start/stop plus roughly 50 ms Float32 frames over `voice_command_*` events
+- State split: browser-private transcript/status stays in `VoiceControls`; rover/fleet transcription stays in `TranscriptionDisplay`
+- Cleanup: stop, disconnect, auth failure, mode switch, and unmount all release microphone, worklet, `AudioContext`, analyser, RAF, and object URLs
 
 ## Testing & Quality Assurance
 
-**Current state:**
-- No test framework configured (Vitest ready to integrate)
-- ESLint configured (can run `pnpm lint`)
-- TypeScript strict mode enabled
+**Current state as of 2026-07-03:**
+- Vitest + Testing Library active for `packages/ui`
+- UI lifecycle/state coverage added for browser capture, privacy split, reconnect cleanup, and null-confidence rendering
+- ESLint configured and passing via `pnpm lint`
+- TypeScript strict mode enabled and passing via `pnpm check-types`
 
-**Future setup:**
-- Vitest with jsdom environment
-- Service Factory pattern enables component/hook mocking
-- E2E tests via Playwright (Tauri compatibility pending)
+**Remaining gaps:**
+- Live microphone + backend browser E2E is still manual
+- Service Factory pattern still available for broader component/hook mocking
+- Playwright/Tauri E2E remains future work
 
 ## Deployment Targets
 
@@ -310,11 +318,11 @@ socketService.emit('rover_command', { ... });
 ## Known Limitations
 
 1. **Legacy src/ structure** — Old pre-monorepo root app still active; migration to packages/ ongoing
-2. **No persistence** — All state lost on app reload; no localStorage/session storage
-3. **No auth** — Credentials hardcoded; no JWT, session management, or logout flow
-4. **No offline queue** — Commands dropped if disconnected; no retry logic
-5. **No tests** — Service layer ready for testing, but no test suite exists
-6. **Single rover control** — Only one active rover at a time (fleet view only)
+2. **Selective persistence** — Session token survives reconnect, but command and telemetry state do not
+3. **No offline queue** — Commands dropped if disconnected; no retry logic
+4. **Browser voice prerequisites** — Browser capture requires HTTPS or `localhost`, microphone permission, backend STT readiness, and a selected rover
+5. **No browser E2E** — Vitest covers UI logic, but real microphone/backend end-to-end validation is still manual
+6. **Single rover command target** — Only one active selected rover at a time for browser voice capture and manual control
 
 ## Next Steps
 

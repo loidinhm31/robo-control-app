@@ -1,272 +1,387 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Socket } from "socket.io-client";
-import { Mic, Volume2, Send, Radio, Headphones, AlertCircle, Shield, ChevronDown } from "lucide-react";
+import type {
+  SpeechTranscription,
+  SttStatus,
+} from "@robo-fleet/shared/types";
+import {
+  AlertCircle,
+  ChevronDown,
+  Headphones,
+  Radio,
+  Send,
+  Shield,
+  Volume2,
+} from "lucide-react";
+import {
+  useBrowserVoiceCapture,
+  type BrowserVoiceSocket,
+} from "../../hooks/use-browser-voice-capture";
 import { DraggablePanel } from "../organisms";
 import { InputWithAction } from "../molecules";
 import { IconBadge, StatusBadge } from "../atoms";
+import { VoiceCommandPanel } from "./voice-command-panel";
+
+const WALKIE_PROCESSOR_NAME = "walkie-talkie-capture";
 
 interface VoiceControlsProps {
-  socket: Socket | null;
+  socket: BrowserVoiceSocket | null;
   isConnected: boolean;
-  onLog?: (message: string, type?: "info" | "success" | "error" | "warning") => void;
+  isAuthenticated: boolean;
+  sttStatus: SttStatus | null;
+  selectedEntityId: string | null;
+  browserTranscriptions: readonly SpeechTranscription[];
+  onLog?: (
+    message: string,
+    type?: "info" | "success" | "error" | "warning",
+  ) => void;
 }
 
-type VoiceMode = "idle" | "voice_commands" | "walkie_talkie";
+interface WalkieResources {
+  audioContext: AudioContext;
+  mediaStream: MediaStream;
+  sourceNode: MediaStreamAudioSourceNode;
+  analyserNode: AnalyserNode;
+  workletNode: AudioWorkletNode;
+  animationFrameId: number | null;
+}
+
+function createWalkieProcessorUrl(frameSize: number): string {
+  const processorCode = `
+    class WalkieTalkieCaptureProcessor extends AudioWorkletProcessor {
+      constructor() {
+        super();
+        this.frameSize = ${frameSize};
+        this.buffer = new Float32Array(this.frameSize);
+        this.index = 0;
+      }
+
+      process(inputs) {
+        const channel = inputs[0] && inputs[0][0];
+        if (!channel) return true;
+        for (let index = 0; index < channel.length; index += 1) {
+          this.buffer[this.index] = channel[index];
+          this.index += 1;
+          if (this.index === this.frameSize) {
+            const frame = this.buffer;
+            this.port.postMessage(
+              { type: "audio-data", audioData: frame },
+              [frame.buffer],
+            );
+            this.buffer = new Float32Array(this.frameSize);
+            this.index = 0;
+          }
+        }
+        return true;
+      }
+    }
+
+    registerProcessor("${WALKIE_PROCESSOR_NAME}", WalkieTalkieCaptureProcessor);
+  `;
+  return URL.createObjectURL(
+    new Blob([processorCode], { type: "application/javascript" }),
+  );
+}
+
+async function releaseWalkieResources(
+  resources: WalkieResources,
+): Promise<void> {
+  if (resources.animationFrameId !== null) {
+    cancelAnimationFrame(resources.animationFrameId);
+    resources.animationFrameId = null;
+  }
+  resources.workletNode.port.onmessage = null;
+  resources.sourceNode.disconnect();
+  resources.analyserNode.disconnect();
+  resources.workletNode.disconnect();
+  resources.mediaStream.getTracks().forEach((track) => track.stop());
+  if (resources.audioContext.state !== "closed") {
+    await resources.audioContext.close().catch(() => undefined);
+  }
+}
+
+function browserDisabledReason(
+  isConnected: boolean,
+  isAuthenticated: boolean,
+  sttStatus: SttStatus | null,
+  selectedEntityId: string | null,
+): string | null {
+  if (!isConnected) return "Connect to the Orchestra server first.";
+  if (!isAuthenticated) return "Wait for an authenticated session.";
+  if (!sttStatus) return "Waiting for authoritative STT status.";
+  if (sttStatus.state === "loading") return "The central STT model is loading.";
+  if (sttStatus.state === "error") return "Central STT is unavailable.";
+  if (!selectedEntityId) return "Select a target rover before starting.";
+  return null;
+}
 
 export const VoiceControls: React.FC<VoiceControlsProps> = ({
   socket,
   isConnected,
+  isAuthenticated,
+  sttStatus,
+  selectedEntityId,
+  browserTranscriptions,
   onLog,
 }) => {
-  // TTS state
   const [ttsText, setTtsText] = useState("");
   const [isSendingTTS, setIsSendingTTS] = useState(false);
-
-  // Voice mode state
-  const [voiceMode, setVoiceMode] = useState<VoiceMode>("idle");
-  const [audioLevel, setAudioLevel] = useState(0);
-  const [permissionError, setPermissionError] = useState<string>("");
-
-  // Visibility state
+  const [isWalkieActive, setIsWalkieActive] = useState(false);
+  const [isWalkieStarting, setIsWalkieStarting] = useState(false);
+  const [walkieAudioLevel, setWalkieAudioLevel] = useState(0);
+  const [walkieError, setWalkieError] = useState<string | null>(null);
   const [isVisible, setIsVisible] = useState(false);
 
-  // Audio refs
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const processorRef = useRef<ScriptProcessorNode | null>(null);
-  const analyserRef = useRef<AnalyserNode | null>(null);
-  const mediaStreamRef = useRef<MediaStream | null>(null);
-  const animationFrameRef = useRef<number | null>(null);
+  const walkieResourcesRef = useRef<WalkieResources | null>(null);
+  const walkieGenerationRef = useRef(0);
+  const walkieStartPendingRef = useRef(false);
+  const mountedRef = useRef(true);
+  const ttsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Send TTS command
-  const sendTTS = useCallback((text: string) => {
-    if (!isConnected || !socket || !text.trim()) {
-      onLog?.("Cannot send TTS - not connected or empty text", "error");
-      return;
+  const disabledReason = browserDisabledReason(
+    isConnected,
+    isAuthenticated,
+    sttStatus,
+    selectedEntityId,
+  );
+  const browserCapture = useBrowserVoiceCapture({
+    socket,
+    enabled: disabledReason === null,
+    targetEntityId: selectedEntityId,
+    onLog,
+  });
+
+  const sendTTS = useCallback(
+    (text: string): void => {
+      if (!isConnected || !socket?.connected || !text.trim()) {
+        onLog?.("Cannot send TTS - not connected or empty text", "error");
+        return;
+      }
+      if (ttsTimerRef.current) window.clearTimeout(ttsTimerRef.current);
+      setIsSendingTTS(true);
+      socket.emit("tts_command", { text: text.trim() });
+      onLog?.(`TTS: "${text.trim()}"`, "success");
+      ttsTimerRef.current = window.setTimeout(() => {
+        setIsSendingTTS(false);
+        ttsTimerRef.current = null;
+      }, 300);
+    },
+    [isConnected, onLog, socket],
+  );
+
+  const stopWalkieTalkie = useCallback(async (): Promise<void> => {
+    walkieGenerationRef.current += 1;
+    const resources = walkieResourcesRef.current;
+    walkieResourcesRef.current = null;
+    if (resources) await releaseWalkieResources(resources);
+    if (mountedRef.current) {
+      setIsWalkieActive(false);
+      setIsWalkieStarting(false);
+      setWalkieAudioLevel(0);
     }
-
-    setIsSendingTTS(true);
-    socket.emit("tts_command", { text: text.trim() });
-    onLog?.(`TTS: "${text.trim()}"`, "success");
-
-    setTimeout(() => {
-      setIsSendingTTS(false);
-    }, 300);
-  }, [isConnected, socket, onLog]);
-
-  // Visualize audio level
-  const visualizeAudioLevel = useCallback(() => {
-    if (!analyserRef.current) return;
-
-    const analyser = analyserRef.current;
-    const dataArray = new Uint8Array(analyser.frequencyBinCount);
-    analyser.getByteFrequencyData(dataArray);
-
-    const average = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
-    setAudioLevel(average / 255);
-
-    animationFrameRef.current = requestAnimationFrame(visualizeAudioLevel);
   }, []);
 
-  // Request microphone permission
-  const requestMicrophonePermission = useCallback(async (): Promise<MediaStream | null> => {
-    setPermissionError("");
-
+  const startWalkieTalkie = useCallback(async (): Promise<void> => {
+    if (!isConnected || !socket?.connected) {
+      onLog?.("Cannot start walkie-talkie - not connected", "error");
+      return;
+    }
+    if (walkieStartPendingRef.current || walkieResourcesRef.current) return;
+    const generation = walkieGenerationRef.current + 1;
+    walkieGenerationRef.current = generation;
+    walkieStartPendingRef.current = true;
+    setIsWalkieStarting(true);
+    setWalkieError(null);
+    let mediaStream: MediaStream | null = null;
+    let audioContext: AudioContext | null = null;
+    let sourceNode: MediaStreamAudioSourceNode | null = null;
+    let analyserNode: AnalyserNode | null = null;
+    let workletNode: AudioWorkletNode | null = null;
+    let resources: WalkieResources | null = null;
     try {
       if (!window.isSecureContext && window.location.hostname !== "localhost") {
-        setPermissionError("Microphone requires HTTPS or localhost");
-        onLog?.("Microphone requires HTTPS or localhost", "error");
-        return null;
+        throw new Error("Microphone requires HTTPS or localhost");
       }
-
-      const stream = await navigator.mediaDevices.getUserMedia({
+      mediaStream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true,
-          sampleRate: 16000,
+          sampleRate: 16_000,
           channelCount: 1,
         },
       });
-
-      return stream;
-    } catch (error) {
-      console.error("Microphone permission error:", error);
-
-      if (error instanceof Error) {
-        if (error.name === "NotAllowedError") {
-          setPermissionError(
-            "Microphone permission denied. Please allow microphone access in your browser settings."
-          );
-        } else if (error.name === "NotFoundError") {
-          setPermissionError("No microphone found. Please connect a microphone.");
-          onLog?.("No microphone device found", "error");
-        } else if (error.name === "NotReadableError") {
-          setPermissionError("Microphone is already in use by another application.");
-          onLog?.("Microphone already in use", "error");
-        } else {
-          setPermissionError(`Microphone error: ${error.message}`);
-          onLog?.(`Microphone error: ${error.message}`, "error");
-        }
+      if (
+        !mountedRef.current ||
+        walkieGenerationRef.current !== generation ||
+        !socket.connected
+      ) {
+        mediaStream.getTracks().forEach((track) => track.stop());
+        return;
       }
 
-      return null;
-    }
-  }, [onLog]);
-
-  // Create AudioWorklet processor
-  const createAudioWorkletProcessor = useCallback((bufferSize: number, processorName: string) => {
-    const processorCode = `
-      class ${processorName} extends AudioWorkletProcessor {
-        constructor() {
-          super();
-          this.bufferSize = ${bufferSize};
-          this.buffer = new Float32Array(this.bufferSize);
-          this.bufferIndex = 0;
-        }
-
-        process(inputs, outputs, parameters) {
-          const input = inputs[0];
-          if (input.length > 0) {
-            const channelData = input[0];
-
-            for (let i = 0; i < channelData.length; i++) {
-              this.buffer[this.bufferIndex] = channelData[i];
-              this.bufferIndex++;
-
-              if (this.bufferIndex >= this.bufferSize) {
-                this.port.postMessage({
-                  type: 'audio-data',
-                  audioData: new Float32Array(this.buffer)
-                });
-
-                this.bufferIndex = 0;
-                this.buffer.fill(0);
-              }
-            }
-          }
-
-          return true;
-        }
+      audioContext = new AudioContext({ sampleRate: 16_000 });
+      sourceNode = audioContext.createMediaStreamSource(mediaStream);
+      analyserNode = audioContext.createAnalyser();
+      analyserNode.fftSize = 256;
+      const frameSize = Math.max(1, Math.round(audioContext.sampleRate * 0.05));
+      const processorUrl = createWalkieProcessorUrl(frameSize);
+      try {
+        await audioContext.audioWorklet.addModule(processorUrl);
+      } finally {
+        URL.revokeObjectURL(processorUrl);
       }
-
-      registerProcessor('${processorName}', ${processorName});
-    `;
-
-    const blob = new Blob([processorCode], { type: "application/javascript" });
-    return URL.createObjectURL(blob);
-  }, []);
-
-  // Start voice command mode
-  const startVoiceCommands = useCallback(async () => {
-    if (!isConnected || !socket) {
-      onLog?.("Cannot start voice commands - not connected", "error");
-      return;
-    }
-
-    const stream = await requestMicrophonePermission();
-    if (!stream) return;
-
-    try {
-      const audioContext = new AudioContext({ sampleRate: 16000 });
-      const source = audioContext.createMediaStreamSource(stream);
-      const analyser = audioContext.createAnalyser();
-      analyser.fftSize = 256;
-      source.connect(analyser);
-
-      const processorUrl = createAudioWorkletProcessor(4096, "VoiceCommandProcessor");
-      await audioContext.audioWorklet.addModule(processorUrl);
-
-      const workletNode = new AudioWorkletNode(audioContext, "VoiceCommandProcessor");
-      source.connect(workletNode);
-
-      audioContextRef.current = audioContext;
-      analyserRef.current = analyser;
-      mediaStreamRef.current = stream;
-      setVoiceMode("voice_commands");
-      visualizeAudioLevel();
-
-      onLog?.("Voice commands started", "success");
-    } catch (error) {
-      console.error("Voice command error:", error);
-      onLog?.("Failed to start voice commands", "error");
-      stream.getTracks().forEach((track) => track.stop());
-    }
-  }, [isConnected, socket, onLog, requestMicrophonePermission, createAudioWorkletProcessor, visualizeAudioLevel]);
-
-  // Start walkie-talkie mode
-  const startWalkieTalkie = useCallback(async () => {
-    if (!isConnected || !socket) {
-      onLog?.("Cannot start walkie-talkie - not connected", "error");
-      return;
-    }
-
-    const stream = await requestMicrophonePermission();
-    if (!stream) return;
-
-    try {
-      const audioContext = new AudioContext({ sampleRate: 16000 });
-      const source = audioContext.createMediaStreamSource(stream);
-      const analyser = audioContext.createAnalyser();
-      analyser.fftSize = 256;
-      source.connect(analyser);
-
-      const processorUrl = createAudioWorkletProcessor(800, "WalkieTalkieProcessor");
-      await audioContext.audioWorklet.addModule(processorUrl);
-
-      const workletNode = new AudioWorkletNode(audioContext, "WalkieTalkieProcessor");
-      workletNode.port.onmessage = (event) => {
-        if (event.data.type === "audio-data") {
-          socket.emit("audio_stream", { audio_data: Array.from(event.data.audioData) });
+      if (
+        !mountedRef.current ||
+        walkieGenerationRef.current !== generation ||
+        !socket.connected
+      ) {
+        sourceNode.disconnect();
+        analyserNode.disconnect();
+        mediaStream.getTracks().forEach((track) => track.stop());
+        await audioContext.close();
+        return;
+      }
+      workletNode = new AudioWorkletNode(audioContext, WALKIE_PROCESSOR_NAME, {
+        numberOfInputs: 1,
+        numberOfOutputs: 0,
+        channelCount: 1,
+      });
+      workletNode.port.onmessage = (event: MessageEvent<unknown>): void => {
+        if (
+          socket.connected &&
+          typeof event.data === "object" &&
+          event.data !== null &&
+          "type" in event.data &&
+          event.data.type === "audio-data" &&
+          "audioData" in event.data &&
+          event.data.audioData instanceof Float32Array
+        ) {
+          socket.emit("audio_stream", {
+            audio_data: Array.from(event.data.audioData),
+          });
         }
       };
-
-      source.connect(workletNode);
-
-      audioContextRef.current = audioContext;
-      analyserRef.current = analyser;
-      mediaStreamRef.current = stream;
-      setVoiceMode("walkie_talkie");
-      visualizeAudioLevel();
-
+      resources = {
+        audioContext,
+        mediaStream,
+        sourceNode,
+        analyserNode,
+        workletNode,
+        animationFrameId: null,
+      };
+      walkieResourcesRef.current = resources;
+      sourceNode.connect(analyserNode);
+      analyserNode.connect(workletNode);
+      await audioContext.resume();
+      if (
+        !mountedRef.current ||
+        walkieGenerationRef.current !== generation ||
+        walkieResourcesRef.current !== resources ||
+        !socket.connected
+      ) {
+        if (walkieResourcesRef.current === resources) {
+          walkieResourcesRef.current = null;
+          await releaseWalkieResources(resources);
+        }
+        return;
+      }
+      if (!resources) return;
+      const activeResources = resources;
+      const levelData = new Uint8Array(analyserNode.frequencyBinCount);
+      const updateLevel = (): void => {
+        if (walkieResourcesRef.current !== activeResources) return;
+        analyserNode?.getByteFrequencyData(levelData);
+        const average = levelData.reduce((sum, value) => sum + value, 0) /
+          Math.max(1, levelData.length);
+        setWalkieAudioLevel(average / 255);
+        activeResources.animationFrameId = requestAnimationFrame(updateLevel);
+      };
+      activeResources.animationFrameId = requestAnimationFrame(updateLevel);
+      setIsWalkieActive(true);
+      setIsWalkieStarting(false);
       onLog?.("Walkie-talkie started", "success");
-    } catch (error) {
-      console.error("Walkie-talkie error:", error);
-      onLog?.("Failed to start walkie-talkie", "error");
-      stream.getTracks().forEach((track) => track.stop());
+    } catch (caught) {
+      const message = caught instanceof Error
+        ? caught.message
+        : "Failed to start walkie-talkie";
+      if (resources && walkieResourcesRef.current === resources) {
+        walkieResourcesRef.current = null;
+        await releaseWalkieResources(resources);
+      } else if (!resources) {
+        workletNode?.disconnect();
+        analyserNode?.disconnect();
+        sourceNode?.disconnect();
+        mediaStream?.getTracks().forEach((track) => track.stop());
+        if (audioContext && audioContext.state !== "closed") {
+          await audioContext.close().catch(() => undefined);
+        }
+      }
+      if (mountedRef.current && walkieGenerationRef.current === generation) {
+        setWalkieError(message);
+        setIsWalkieActive(false);
+        setIsWalkieStarting(false);
+        onLog?.(message, "error");
+      }
+    } finally {
+      walkieStartPendingRef.current = false;
+      if (
+        mountedRef.current &&
+        walkieGenerationRef.current === generation &&
+        walkieResourcesRef.current === null
+      ) {
+        setIsWalkieStarting(false);
+      }
     }
-  }, [isConnected, socket, onLog, requestMicrophonePermission, createAudioWorkletProcessor, visualizeAudioLevel]);
+  }, [isConnected, onLog, socket]);
 
-  // Stop current voice mode
-  const stopVoiceMode = useCallback(() => {
-    if (animationFrameRef.current) {
-      cancelAnimationFrame(animationFrameRef.current);
+  const toggleBrowserCapture = useCallback(async (): Promise<void> => {
+    if (browserCapture.isCapturing) {
+      await browserCapture.stop();
+      return;
     }
+    if (isWalkieActive || isWalkieStarting) await stopWalkieTalkie();
+    await browserCapture.start();
+  }, [
+    browserCapture,
+    isWalkieActive,
+    isWalkieStarting,
+    stopWalkieTalkie,
+  ]);
 
-    if (audioContextRef.current) {
-      audioContextRef.current.close();
-      audioContextRef.current = null;
+  const toggleWalkieTalkie = useCallback(async (): Promise<void> => {
+    if (isWalkieActive) {
+      await stopWalkieTalkie();
+      onLog?.("Walkie-talkie stopped", "info");
+      return;
     }
+    if (browserCapture.state !== "idle") await browserCapture.stop();
+    await startWalkieTalkie();
+  }, [
+    browserCapture,
+    isWalkieActive,
+    onLog,
+    startWalkieTalkie,
+    stopWalkieTalkie,
+  ]);
 
-    if (mediaStreamRef.current) {
-      mediaStreamRef.current.getTracks().forEach((track) => track.stop());
-      mediaStreamRef.current = null;
-    }
-
-    analyserRef.current = null;
-    processorRef.current = null;
-    setVoiceMode("idle");
-    setAudioLevel(0);
-    onLog?.("Voice mode stopped", "info");
-  }, [onLog]);
-
-  // Cleanup on unmount
   useEffect(() => {
-    return () => {
-      stopVoiceMode();
-    };
-  }, [stopVoiceMode]);
+    if (!isConnected) void stopWalkieTalkie();
+  }, [isConnected, stopWalkieTalkie]);
 
-  // Collapsed content
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (ttsTimerRef.current) window.clearTimeout(ttsTimerRef.current);
+      void stopWalkieTalkie();
+    };
+  }, [stopWalkieTalkie]);
+
+  const activeMode = browserCapture.isCapturing
+    ? "Commands"
+    : isWalkieActive
+      ? "Walkie"
+      : null;
   const collapsedContent = (
     <button className="group flex items-center gap-2 px-3 py-1.5 bg-slate-900/95 backdrop-blur-md border border-slate-700/50 rounded-full shadow-lg hover:shadow-xl transition-all hover:scale-105 drag-handle cursor-move">
       <Volume2 className="w-3.5 h-3.5 text-orange-400" />
@@ -287,7 +402,6 @@ export const VoiceControls: React.FC<VoiceControlsProps> = ({
       showControls={true}
     >
       <div className="space-y-3">
-        {/* Connection Warning */}
         {!isConnected && (
           <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-2 flex items-center gap-2">
             <AlertCircle className="w-4 h-4 text-yellow-400" />
@@ -295,15 +409,13 @@ export const VoiceControls: React.FC<VoiceControlsProps> = ({
           </div>
         )}
 
-        {/* Permission Error */}
-        {permissionError && (
+        {walkieError && (
           <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-2 flex items-center gap-2">
             <Shield className="w-4 h-4 text-red-400" />
-            <span className="text-xs text-red-400">{permissionError}</span>
+            <span className="text-xs text-red-400">{walkieError}</span>
           </div>
         )}
 
-        {/* TTS Section */}
         <div className="glass-card-light rounded-xl p-3 space-y-2">
           <div className="flex items-center gap-2">
             <Volume2 className="w-4 h-4 text-orange-400" />
@@ -319,110 +431,80 @@ export const VoiceControls: React.FC<VoiceControlsProps> = ({
           />
         </div>
 
-        {/* Voice Modes Section */}
-        <div className="glass-card-light rounded-xl p-3 space-y-3">
+        <div className="glass-card-light rounded-xl p-3 space-y-2">
           <div className="flex items-center gap-2">
             <Radio className="w-4 h-4 text-green-400" />
             <h3 className="text-sm font-semibold text-white">Voice Modes</h3>
-            {voiceMode !== "idle" && (
+            {activeMode && (
               <IconBadge
-                icon={voiceMode === "voice_commands" ? Mic : Headphones}
-                label={voiceMode === "voice_commands" ? "Commands" : "Walkie"}
+                icon={isWalkieActive ? Headphones : Radio}
+                label={activeMode}
                 color="text-green-400"
                 size="sm"
                 animated
               />
             )}
           </div>
+        </div>
 
-          {/* Voice Commands */}
-          <div className="glass-card-light rounded-xl p-3 space-y-2">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Mic className="w-4 h-4 text-cyan-400" />
-                <span className="text-sm font-semibold text-white">Voice Commands</span>
-              </div>
-              <StatusBadge
-                variant={voiceMode === "voice_commands" ? "online" : "offline"}
-                animated={voiceMode === "voice_commands"}
-              />
+        <VoiceCommandPanel
+          captureState={browserCapture.state}
+          audioLevel={browserCapture.audioLevel}
+          captureError={browserCapture.error}
+          sttStatus={sttStatus}
+          selectedTargetEntityId={selectedEntityId}
+          capturedTargetEntityId={browserCapture.capturedTargetEntityId}
+          transcriptions={browserTranscriptions}
+          canStart={disabledReason === null}
+          disabledReason={disabledReason}
+          onToggleCapture={toggleBrowserCapture}
+        />
+
+        <div className="glass-card-light rounded-xl p-3 space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Headphones className="w-4 h-4 text-cyan-400" />
+              <span className="text-sm font-semibold text-white">Walkie-Talkie</span>
             </div>
-            <p className="text-xs text-white/60">Use voice to control the rover</p>
-            <button
-              onClick={() => {
-                if (voiceMode === "voice_commands") {
-                  stopVoiceMode();
-                } else {
-                  if (voiceMode !== "idle") stopVoiceMode();
-                  startVoiceCommands();
-                }
-              }}
-              disabled={!isConnected}
-              className={`w-full py-2 px-4 rounded-lg font-semibold transition-all duration-300 ${
-                voiceMode === "voice_commands"
-                  ? "bg-red-500/20 text-red-400 hover:bg-red-500/30"
-                  : "bg-green-500/20 text-green-400 hover:bg-green-500/30"
-              } disabled:opacity-50 disabled:cursor-not-allowed`}
-            >
-              {voiceMode === "voice_commands" ? "Stop" : "Start"}
-            </button>
+            <StatusBadge
+              variant={isWalkieActive ? "online" : "offline"}
+              animated={isWalkieActive}
+            />
           </div>
-
-          {/* Walkie-Talkie */}
-          <div className="glass-card-light rounded-xl p-3 space-y-2">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Headphones className="w-4 h-4 text-cyan-400" />
-                <span className="text-sm font-semibold text-white">Walkie-Talkie</span>
-              </div>
-              <StatusBadge
-                variant={voiceMode === "walkie_talkie" ? "online" : "offline"}
-                animated={voiceMode === "walkie_talkie"}
-              />
-            </div>
-            <p className="text-xs text-white/60">Stream audio directly to rover</p>
-            <button
-              onClick={() => {
-                if (voiceMode === "walkie_talkie") {
-                  stopVoiceMode();
-                } else {
-                  if (voiceMode !== "idle") stopVoiceMode();
-                  startWalkieTalkie();
-                }
-              }}
-              disabled={!isConnected}
-              className={`w-full py-2 px-4 rounded-lg font-semibold transition-all duration-300 ${
-                voiceMode === "walkie_talkie"
-                  ? "bg-red-500/20 text-red-400 hover:bg-red-500/30"
-                  : "bg-green-500/20 text-green-400 hover:bg-green-500/30"
-              } disabled:opacity-50 disabled:cursor-not-allowed`}
-            >
-              {voiceMode === "walkie_talkie" ? "Stop" : "Start"}
-            </button>
-          </div>
-
-          {/* Audio Level Visualization */}
-          {voiceMode !== "idle" && (
-            <div className="mt-2">
+          <p className="text-xs text-white/60">Stream audio directly to rover</p>
+          <button
+            type="button"
+            onClick={() => void toggleWalkieTalkie()}
+            disabled={!isConnected || isWalkieStarting}
+            data-testid="walkie-toggle"
+            className={`w-full py-2 px-4 rounded-lg font-semibold transition-all duration-200 ${
+              isWalkieActive
+                ? "bg-red-500/20 text-red-400 hover:bg-red-500/30"
+                : "bg-green-500/20 text-green-400 hover:bg-green-500/30"
+            } disabled:opacity-50 disabled:cursor-not-allowed`}
+          >
+            {isWalkieStarting ? "Starting…" : isWalkieActive ? "Stop" : "Start"}
+          </button>
+          {isWalkieActive && (
+            <div>
               <div className="flex justify-between text-xs text-white/60 mb-1">
                 <span>Audio Level</span>
-                <span>{(audioLevel * 100).toFixed(0)}%</span>
+                <span>{Math.round(walkieAudioLevel * 100)}%</span>
               </div>
               <div className="w-full h-2 bg-slate-700/50 rounded-full overflow-hidden">
                 <div
                   className="h-full bg-emerald-500 transition-all duration-100"
-                  style={{ width: `${audioLevel * 100}%` }}
+                  style={{ width: `${Math.min(100, walkieAudioLevel * 100)}%` }}
                 />
               </div>
             </div>
           )}
         </div>
 
-        {/* Help Text */}
         <div className="text-xs text-white/40 space-y-1">
-          <p>• <strong>Voice Commands:</strong> Say &quot;move forward&quot;, &quot;turn left&quot;, &quot;track person&quot;, etc.</p>
-          <p>• <strong>Walkie-Talkie:</strong> Direct audio streaming for communication</p>
-          <p>• <strong>TTS:</strong> Type text for rover to speak</p>
+          <p>• <strong>Voice Commands:</strong> private browser capture and final results</p>
+          <p>• <strong>Walkie-Talkie:</strong> direct audio streaming for communication</p>
+          <p>• <strong>TTS:</strong> manually send text for the rover to speak</p>
         </div>
       </div>
     </DraggablePanel>

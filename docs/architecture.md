@@ -189,6 +189,25 @@ sequenceDiagram
     Socket-->>RRC: commandsReceived++
 ```
 
+### Pattern A — STT Source Separation
+
+```mermaid
+flowchart LR
+    MIC["Browser microphone"] --> CAP["use-browser-voice-capture"]
+    CAP -->|voice_command_control/audio| WB["web_bridge"]
+    ROVERMIC["Rover microphone"] --> WB
+    WB --> STT["central STT"]
+    STT -->|voice_command_transcription| VC["VoiceControls<br/>private browser history"]
+    STT -->|transcription| TD["TranscriptionDisplay<br/>fleet rover history"]
+    STT -->|stt_status| VC
+    STT -->|stt_status| TD
+```
+
+- Browser-origin transcripts stay private to the authenticated socket that started the stream.
+- Rover-origin transcripts remain fleet-visible and retain authoritative rover identity.
+- Backend `stt_status` and startup-selected profile/language are authoritative display state for both voice surfaces.
+- Browser capture UI never sends authoritative target/entity fields; the backend snapshots the selected rover when a browser stream starts.
+
 ### Pattern B — Service Abstraction
 
 ```mermaid
@@ -339,12 +358,41 @@ flowchart LR
 
 ### STT Source Split
 
-- Phase 01 defines the future wire contract. It does not complete the transport split.
-- `voice_command_transcription` is the reserved browser-private final-text event for the Phase 04/06 cutover.
-- `transcription` is still the only live STT event in the current runtime. After the cutover it becomes the rover-origin transcript surface for authenticated fleet clients.
-- `stt_status` is the reserved global backend state event (`loading`, `ready`, `error`) plus the startup-selected profile.
-- `target_entity_id` is assigned by the backend from authoritative fleet state at browser stream start after the transport cutover. The Phase 01 baseline still falls back to the current `SELECTED_ENTITY_ID`.
+- Phase 03 activates the browser/private and rover/fleet UI split on top of the Phase 01 transport contract.
+- `voice_command_transcription` is the browser-private final-text event. Its history stays inside `VoiceControls` and is cleared on disconnect and auth failure.
+- `transcription` is the rover-origin transcript surface for authenticated fleet clients. `TranscriptionDisplay` ignores browser-origin entries and labels rover entries with their authoritative `entity_id`.
+- `stt_status` is the authoritative global backend state event (`loading`, `ready`, `error`) plus the startup-selected profile. The UI does not synthesize or locally override this state.
+- `target_entity_id` is assigned by the backend from authoritative fleet state at browser stream start. The browser shows the captured rover only as informational UI state and does not send target authority back to the server.
 - `SpeechTranscription.confidence` is optional. UI must omit percentage rendering when confidence is `null` or absent.
+
+### Browser Voice Command Flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant User
+    participant VC as VoiceControls
+    participant Hook as use-browser-voice-capture
+    participant Socket as Socket.IO
+    participant Backend as web_bridge
+
+    User->>VC: Start browser voice
+    VC->>Hook: startCapture()
+    Hook->>Socket: emit voice_command_control(start)
+    Hook->>Socket: emit voice_command_audio(frame_id, sample_rate, samples)
+    Backend-->>Socket: stt_status
+    Backend-->>Socket: voice_command_transcription(final text)
+    Socket-->>VC: update private history + status/profile
+    User->>VC: Stop / mode switch / disconnect
+    VC->>Hook: stopCapture()
+    Hook->>Socket: emit voice_command_control(stop)
+    Hook->>Hook: flush partial frame, teardown media/worklet/context
+```
+
+- `use-browser-voice-capture` owns microphone permission, `AudioContext`, `AudioWorkletNode`, analyser, frame batching, and exact-once stop behavior.
+- Browser audio is emitted as roughly 50 ms `Float32` frames using the actual `AudioContext.sampleRate`.
+- Teardown runs on explicit stop, mode switch, unmount, disconnect, auth failure, and startup errors.
+- Walkie-talkie and manual TTS stay on their existing paths and must release resources before browser capture can reactivate.
 
 ## Type System
 
@@ -467,6 +515,13 @@ Canvas-based grid with 1m spacing, robot position circle + heading arrow, zoom/p
 ### FleetSelector — Multi-Rover Management
 
 Displays `fleet_roster` with per-rover metrics (battery, CPU, memory, FPS). Online detection via metrics timestamp freshness (< 10s). Click to emit `fleet_select`.
+
+### VoiceControls + TranscriptionDisplay
+
+- `VoiceControls` renders browser-private command history, backend-owned STT readiness/profile, current capture target label, and manual TTS controls.
+- `TranscriptionDisplay` renders only rover/fleet transcription history with rover badge, profile/language metadata, final text, and optional confidence.
+- `RoboRoverControl` owns the socket listeners and keeps browser/private history separate from fleet-visible rover history.
+- Browser-private transcript text is not copied into the general page log stream.
 
 ## State Management
 

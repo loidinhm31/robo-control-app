@@ -15,7 +15,8 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { io, Socket } from "socket.io-client";
+import { io } from "socket.io-client";
+import type { Socket } from "socket.io-client";
 import { Joystick } from "react-joystick-component";
 import type { IJoystickUpdateEvent } from "react-joystick-component/build/lib/Joystick.js";
 import {
@@ -35,7 +36,10 @@ import type {
   FleetStatus,
   JointPositions,
   LogEntry,
+  ClientToServerEvents,
+  ServerToClientEvents,
   SpeechTranscription,
+  SttStatus,
   SystemMetrics,
   TrackingTelemetry,
   WebArmCommand,
@@ -59,6 +63,19 @@ import { FleetSelector, JointControlPanel, ServerSettings, type SocketAuth } fro
 import { detectMixedContent } from "../../utils/url-validation";
 
 const THROTTLE_DELAY = 100; // ms between updates
+const MAX_TRANSCRIPTION_HISTORY = 20;
+
+type RoboFleetSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
+
+function prependTranscription(
+  history: readonly SpeechTranscription[],
+  transcription: SpeechTranscription,
+): SpeechTranscription[] {
+  if (history.some((item) => item.utterance_id === transcription.utterance_id)) {
+    return [...history];
+  }
+  return [transcription, ...history].slice(0, MAX_TRANSCRIPTION_HISTORY);
+}
 
 // Extended JointPositions with wheel visualization
 interface ExtendedJointPositions extends JointPositions {
@@ -112,7 +129,13 @@ export const RoboRoverControl: React.FC<RoboRoverControlProps> = ({
   const [servoTelemetry, setServoTelemetry] = useState<TrackingTelemetry | null>(null);
 
   // Speech recognition state
-  const [transcription, setTranscription] = useState<SpeechTranscription | null>(null);
+  const [roverTranscriptions, setRoverTranscriptions] = useState<
+    SpeechTranscription[]
+  >([]);
+  const [browserTranscriptions, setBrowserTranscriptions] = useState<
+    SpeechTranscription[]
+  >([]);
+  const [sttStatus, setSttStatus] = useState<SttStatus | null>(null);
   const [isAudioActive, setIsAudioActive] = useState(false);
 
   // Performance metrics state - per robot (entity_id -> metrics)
@@ -151,7 +174,7 @@ export const RoboRoverControl: React.FC<RoboRoverControlProps> = ({
   const [authError, setAuthError] = useState<string | null>(null);
   const [sessionActive, setSessionActive] = useState(false);
 
-  const socketRef = useRef<Socket | null>(null);
+  const socketRef = useRef<RoboFleetSocket | null>(null);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastCommandTime = useRef<number>(0);
   const lastUpdateTime = useRef<number>(Date.now());
@@ -213,13 +236,15 @@ export const RoboRoverControl: React.FC<RoboRoverControlProps> = ({
       ? { ...socketAuth, token: storedToken }
       : socketAuth;
 
+    setSessionActive(false);
+    setSttStatus(null);
     const socket = io(serverUrl, {
       transports: ["websocket", "polling"],
       reconnection: true,
       reconnectionDelay: 1000,
       reconnectionAttempts: 5,
       auth: connectAuth,
-    });
+    }) as RoboFleetSocket;
 
     socket.on("auth_token", (token: string) => {
       try { sessionStorage.setItem(TOKEN_STORAGE_KEY, token); } catch { /* private browsing */ }
@@ -235,6 +260,8 @@ export const RoboRoverControl: React.FC<RoboRoverControlProps> = ({
         rate_limited: "Too many attempts. Please wait.",
         idle_timeout: "Disconnected due to inactivity.",
       };
+      setSessionActive(false);
+      setBrowserTranscriptions([]);
       if (event.reason === "token_expired" || event.reason === "idle_timeout") {
         try { sessionStorage.removeItem(TOKEN_STORAGE_KEY); } catch { /* private browsing */ }
         setSessionActive(false);
@@ -255,6 +282,10 @@ export const RoboRoverControl: React.FC<RoboRoverControlProps> = ({
 
     socket.on("disconnect", (reason) => {
       addLog(`Disconnected: ${reason}`, "warning");
+      setSessionActive(false);
+      setSttStatus(null);
+      setIsAudioActive(false);
+      setBrowserTranscriptions([]);
       setConnection((prev) => ({
         ...prev,
         isConnected: false,
@@ -281,10 +312,31 @@ export const RoboRoverControl: React.FC<RoboRoverControlProps> = ({
     });
 
     socket.on("transcription", (data: SpeechTranscription) => {
-      setTranscription(data);
+      if (data.source_kind !== "rover" || !data.entity_id) {
+        addLog("Ignored invalid non-rover fleet transcription", "warning");
+        return;
+      }
+      setRoverTranscriptions((history) => prependTranscription(history, data));
       const confidenceLabel =
         data.confidence == null ? "no confidence" : `${(data.confidence * 100).toFixed(0)}%`;
-      addLog(`Transcription: "${data.text}" (${confidenceLabel})`, "info");
+      addLog(
+        `Rover transcription [${data.entity_id}]: "${data.text}" (${confidenceLabel})`,
+        "info",
+      );
+    });
+
+    socket.on("voice_command_transcription", (data: SpeechTranscription) => {
+      if (data.source_kind !== "browser" || data.entity_id !== null) {
+        addLog("Ignored invalid non-browser private transcription", "warning");
+        return;
+      }
+      setBrowserTranscriptions((history) => prependTranscription(history, data));
+      addLog("Private browser command received", "info");
+    });
+
+    socket.on("stt_status", (status: SttStatus) => {
+      setSttStatus(status);
+      addLog(`Central STT ${status.state}: ${status.profile}`, status.state === "error" ? "error" : "info");
     });
 
     socket.on("performance_metrics", (data: SystemMetrics) => {
@@ -763,7 +815,8 @@ export const RoboRoverControl: React.FC<RoboRoverControlProps> = ({
           {/* Speech Transcription Display */}
           <div className="mt-3">
             <TranscriptionDisplay
-              transcription={transcription}
+              transcriptions={roverTranscriptions}
+              sttStatus={sttStatus}
               isAudioActive={isAudioActive}
               maxHistory={5}
               onStartAudio={startAudio}
@@ -775,6 +828,10 @@ export const RoboRoverControl: React.FC<RoboRoverControlProps> = ({
           <VoiceControls
             socket={socketRef.current}
             isConnected={connection.isConnected}
+            isAuthenticated={sessionActive}
+            sttStatus={sttStatus}
+            selectedEntityId={fleetStatus?.selected_entity ?? null}
+            browserTranscriptions={browserTranscriptions}
             onLog={addLog}
           />
 

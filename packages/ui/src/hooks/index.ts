@@ -36,3 +36,10 @@ export {
   useAudioStream,
   type UseAudioStreamReturn,
 } from "./use-audio-stream";
+
+export {
+  useBrowserVoiceCapture,
+  type BrowserVoiceCaptureState,
+  type BrowserVoiceSocket,
+  type UseBrowserVoiceCaptureReturn,
+} from "./use-browser-voice-capture";
