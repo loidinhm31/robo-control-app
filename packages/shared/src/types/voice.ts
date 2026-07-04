@@ -1,5 +1,26 @@
 // Speech recognition and voice command types
 
+export type {
+  PlaybackSource,
+  PlaybackState,
+  PlaybackStateKind,
+  TtsAckState,
+  TtsCommand,
+  TtsCommandAck,
+  TtsCommandInput,
+  TtsCommandResult,
+  TtsConfigCommand,
+  TtsConfigState,
+  TtsConfigUpdate,
+  TtsLanguage,
+  TtsPriority,
+  TtsResultState,
+  TtsRuntimeConfig,
+  VoiceReasonCode,
+  VoiceState,
+  VoiceStatus,
+} from "./voice-tts";
+
 export type SttProfile = "en-vad-offline" | "vi-vad-offline";
 export type SttState = "loading" | "ready" | "error";
 export type SttSourceKind = "browser" | "rover";

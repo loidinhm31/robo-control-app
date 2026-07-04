@@ -16,8 +16,14 @@ import type { WebArmCommand, WebRoverCommand, WebTrackingCommand } from "./comma
 import type {
   SpeechTranscription,
   SttStatus,
+  TtsCommandAck,
+  TtsCommandInput,
+  TtsCommandResult,
+  TtsConfigState,
+  TtsConfigUpdate,
   VoiceCommandAudioFrame,
   VoiceCommandControl,
+  VoiceStatus,
 } from "./voice";
 import type { SystemMetrics } from "./performance";
 import type { FleetStatus, FleetSelectCommand, ActiveRoversStatus } from "./fleet";
@@ -79,6 +85,10 @@ export interface ServerToClientEvents {
   transcription: (data: SpeechTranscription) => void;
   voice_command_transcription: (data: SpeechTranscription) => void;
   stt_status: (status: SttStatus) => void;
+  tts_command_ack: (ack: TtsCommandAck) => void;
+  tts_command_result: (result: TtsCommandResult) => void;
+  tts_config_state: (state: TtsConfigState) => void;
+  voice_status: (status: VoiceStatus) => void;
   performance_metrics: (metrics: SystemMetrics) => void;
   fleet_status: (status: FleetStatus) => void;
   active_rovers_status: (status: ActiveRoversStatus) => void;
@@ -92,7 +102,8 @@ export interface ClientToServerEvents {
   camera_control: (control: { command: string }) => void;
   stream_control: (control: { command: "start" | "stop"; video_enabled: boolean; target_fps?: number }) => void;
   audio_control: (control: { command: string }) => void;
-  tts_command: (command: { text: string }) => void;
+  tts_command: (command: TtsCommandInput) => void;
+  tts_config_update: (update: TtsConfigUpdate) => void;
   audio_stream: (data: { audio_data: number[] }) => void;
   voice_command_control: (control: VoiceCommandControl) => void;
   voice_command_audio: (frame: VoiceCommandAudioFrame) => void;
