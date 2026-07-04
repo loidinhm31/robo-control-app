@@ -23,5 +23,7 @@ dist-ssr
 *.sln
 *.sw?
 
-# Old app backup for comparison
-old.app
+.claude
+
+# Turbo build cache
+.turbo
