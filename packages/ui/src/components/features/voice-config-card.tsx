@@ -56,6 +56,7 @@ interface ChoiceGroupProps<TValue> {
   options: readonly { value: TValue; label: string; helper?: string }[];
   onSelect: (value: TValue) => void;
   columnsClassName?: string;
+  testIdPrefix?: string;
 }
 
 function ChoiceGroup<TValue extends string | number>({
@@ -65,6 +66,7 @@ function ChoiceGroup<TValue extends string | number>({
   options,
   onSelect,
   columnsClassName = "grid-cols-3",
+  testIdPrefix,
 }: ChoiceGroupProps<TValue>): React.ReactElement {
   return (
     <div className="space-y-2">
@@ -78,9 +80,10 @@ function ChoiceGroup<TValue extends string | number>({
             <button
               key={`${label}-${option.label}`}
               type="button"
+              aria-pressed={selected}
               disabled={disabled}
               onClick={() => onSelect(option.value)}
-              data-testid={`${slugify(label)}-${slugify(option.label)}`}
+              data-testid={`${testIdPrefix ?? slugify(label)}-${slugify(option.label)}`}
               className={`rounded-xl border px-3 py-2 text-left transition ${
                 selected
                   ? "border-cyan-400/60 bg-cyan-400/15 text-cyan-100"
@@ -178,26 +181,38 @@ export const VoiceConfigCard: React.FC<VoiceConfigCardProps> = ({
             <Volume2 className="h-4 w-4 text-orange-400" />
             <h3 className="text-sm font-semibold text-white">Global TTS Config</h3>
           </div>
-          <p className="text-xs text-white/55">{summaryText}</p>
+          <p className="text-xs text-white/55" data-testid="voice-config-summary">{summaryText}</p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <StatusBadge
-            variant={pendingRevision === null ? "success" : "warning"}
-            className="shrink-0"
-            label={
+          <div
+            data-testid={
               pendingRevision === null
-                ? `Desired R${desiredRevision ?? 0}`
-                : `Pending R${pendingRevision}`
+                ? "voice-config-desired-revision"
+                : "voice-config-pending-revision"
             }
-          />
-          <StatusBadge
-            variant={appliedRovers === activeRovers ? "online" : "warning"}
-            label={`Applied ${appliedRovers}/${activeRovers}`}
-          />
-          <StatusBadge
-            variant={voiceStatusVariant(selectedStatus)}
-            label={`${activeRovers} active`}
-          />
+          >
+            <StatusBadge
+              variant={pendingRevision === null ? "success" : "warning"}
+              className="shrink-0"
+              label={
+                pendingRevision === null
+                  ? `Desired R${desiredRevision ?? 0}`
+                  : `Pending R${pendingRevision}`
+              }
+            />
+          </div>
+          <div data-testid="voice-config-applied-revision">
+            <StatusBadge
+              variant={appliedRovers === activeRovers ? "online" : "warning"}
+              label={`Applied ${appliedRovers}/${activeRovers}`}
+            />
+          </div>
+          <div data-testid="voice-config-active-rovers">
+            <StatusBadge
+              variant={voiceStatusVariant(selectedStatus)}
+              label={`${activeRovers} active`}
+            />
+          </div>
         </div>
       </div>
 
@@ -205,6 +220,7 @@ export const VoiceConfigCard: React.FC<VoiceConfigCardProps> = ({
         <div className="space-y-3">
           <ChoiceGroup
             label="Language"
+            testIdPrefix="language"
             value={config.language}
             disabled={disabled}
             options={[
@@ -217,6 +233,7 @@ export const VoiceConfigCard: React.FC<VoiceConfigCardProps> = ({
 
           <ChoiceGroup
             label={`Voice (${speakerLabel(config.speaker_id)})`}
+            testIdPrefix="speaker"
             value={config.speaker_id}
             disabled={disabled}
             options={TTS_SPEAKER_OPTIONS}
@@ -265,6 +282,7 @@ export const VoiceConfigCard: React.FC<VoiceConfigCardProps> = ({
             </div>
             <ChoiceGroup
               label="Quality preset"
+              testIdPrefix="quality-preset"
               value={config.num_steps}
               disabled={disabled}
               options={TTS_QUALITY_OPTIONS}

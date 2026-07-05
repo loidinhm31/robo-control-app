@@ -78,7 +78,9 @@ export const DraggablePanel: React.FC<DraggablePanelProps> = ({
       onTouchEnd={handleTouchEnd}
       onTouchCancel={handleTouchEnd}
     >
-      <div className={`bg-slate-900/95 backdrop-blur-md border border-slate-700/50 rounded-2xl shadow-2xl max-w-sm md:max-w-md lg:max-w-lg ${className}`}>
+      <div
+        className={`flex max-h-[calc(100vh-1.5rem)] max-w-sm flex-col overflow-hidden rounded-2xl border border-slate-700/50 bg-slate-900/95 shadow-2xl backdrop-blur-md md:max-w-md lg:max-w-lg ${className}`}
+      >
         {/* Header */}
         <div className="drag-handle cursor-move flex items-center justify-between px-4 py-3 border-b border-slate-700/50" style={{ touchAction: "none" }}>
           <div className="flex items-center gap-2">

@@ -11,6 +11,8 @@ export interface InputWithActionProps {
   buttonText?: string;
   clearOnSubmit?: boolean;
   className?: string;
+  inputTestId?: string;
+  buttonTestId?: string;
 }
 
 export const InputWithAction: React.FC<InputWithActionProps> = ({
@@ -23,6 +25,8 @@ export const InputWithAction: React.FC<InputWithActionProps> = ({
   buttonText,
   clearOnSubmit = true,
   className = "",
+  inputTestId,
+  buttonTestId,
 }) => {
   const [internalValue, setInternalValue] = useState("");
 
@@ -50,6 +54,7 @@ export const InputWithAction: React.FC<InputWithActionProps> = ({
   return (
     <div className={`flex gap-1.5 ${className}`}>
       <input
+        data-testid={inputTestId}
         type="text"
         value={value}
         onChange={(e) => setValue(e.target.value)}
@@ -59,6 +64,7 @@ export const InputWithAction: React.FC<InputWithActionProps> = ({
         className="glass-input flex-1 px-3 py-2 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-cyan-400/50"
       />
       <button
+        data-testid={buttonTestId}
         onClick={handleSubmit}
         disabled={disabled || !value.trim()}
         className="btn-warning rounded-xl px-4 py-2 flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"

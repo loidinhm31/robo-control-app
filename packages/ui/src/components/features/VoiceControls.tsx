@@ -569,7 +569,10 @@ export const VoiceControls: React.FC<VoiceControlsProps> = ({
   }, [clearSendTimer, lastTtsResult, pushAlert]);
 
   const collapsedContent = (
-    <button className="group flex items-center gap-2 rounded-full border border-slate-700/50 bg-slate-900/95 px-3 py-1.5 shadow-lg backdrop-blur-md transition-all hover:scale-105 hover:shadow-xl drag-handle cursor-move">
+    <button
+      className="group flex items-center gap-2 rounded-full border border-slate-700/50 bg-slate-900/95 px-3 py-1.5 shadow-lg backdrop-blur-md transition-all hover:scale-105 hover:shadow-xl drag-handle cursor-move"
+      data-testid="voice-panel-toggle"
+    >
       <Volume2 className="h-3.5 w-3.5 text-orange-400" />
       <span className="text-[10px] font-bold uppercase tracking-wide text-white">Voice</span>
       <ChevronDown className="h-3 w-3 text-slate-400 group-hover:text-slate-300" />
@@ -640,10 +643,12 @@ export const VoiceControls: React.FC<VoiceControlsProps> = ({
               <Volume2 className="h-4 w-4 text-orange-400" />
               <h3 className="text-sm font-semibold text-white">Speak Message</h3>
             </div>
-            <StatusBadge
-              variant={ttsDisabledReason ? "warning" : "success"}
-              label={ttsDisabledReason ? "TTS blocked" : "TTS ready"}
-            />
+            <div data-testid="tts-status-badge">
+              <StatusBadge
+                variant={ttsDisabledReason ? "warning" : "success"}
+                label={ttsDisabledReason ? "TTS blocked" : "TTS ready"}
+              />
+            </div>
           </div>
           <InputWithAction
             value={ttsText}
@@ -653,12 +658,15 @@ export const VoiceControls: React.FC<VoiceControlsProps> = ({
             icon={Send}
             buttonText="Speak Now"
             disabled={Boolean(ttsDisabledReason) || isSendingTTS}
+            inputTestId="tts-text-input"
+            buttonTestId="tts-submit-button"
           />
           <p className="text-xs text-white/55">
             Uses the current authoritative global TTS config.
           </p>
           {ttsDisabledReason && (
             <p
+              data-testid="tts-disabled-reason"
               role="status"
               aria-live="polite"
               className="text-xs text-amber-200"

@@ -10,7 +10,8 @@
     "build": "turbo build",
     "check-types": "turbo check-types",
     "lint": "eslint apps/web/src apps/native/src packages/ui/src packages/shared/src",
-    "test:e2e:stream-live": "pnpm --filter @robo-fleet/web test:e2e:stream-live"
+    "test:e2e:stream-live": "pnpm --filter @robo-fleet/web test:e2e:stream-live",
+    "test:e2e:edge-voice-live": "pnpm --filter @robo-fleet/web test:e2e:edge-voice-live"
   },
   "devDependencies": {
     "turbo": "^2.5.4",

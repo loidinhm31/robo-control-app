@@ -1,34 +1,8 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
-
-const nodeProcess = globalThis["process"] as
-  | { env?: Record<string, string | undefined> }
-  | undefined;
-const nodeEnv = nodeProcess?.["env"] ?? {};
-
-const APP_URL = nodeEnv["STREAM_E2E_APP_URL"] ?? "http://127.0.0.1:5173/?audioDebug=1";
-const SOCKET_URL = nodeEnv["STREAM_E2E_SOCKET_URL"] ?? "http://127.0.0.1:3030";
-const USERNAME = nodeEnv["STREAM_E2E_USERNAME"] ?? "admin";
-const PASSWORD = nodeEnv["STREAM_E2E_PASSWORD"] ?? "password";
-
-async function seedAuth(page: Page) {
-  await page.addInitScript(
-    ({ socketUrl, username, password }) => {
-      localStorage.clear();
-      sessionStorage.clear();
-      localStorage.setItem("robo-fleet-server-url", socketUrl);
-      localStorage.setItem("robo-fleet-auth", JSON.stringify({ username, password }));
-    },
-    {
-      socketUrl: SOCKET_URL,
-      username: USERNAME,
-      password: PASSWORD,
-    },
-  );
-}
+import { openLiveApp, seedLiveAuth } from "./helpers/live-session";
 
 async function openLiveCamera(page: Page) {
-  await page.goto(APP_URL, { waitUntil: "networkidle" });
-  await expect(page.getByText("[ONLINE]")).toBeVisible({ timeout: 60_000 });
+  await openLiveApp(page);
   await page.getByTestId("camera-feed-open").click();
   await expect(page.getByTestId("camera-stream-toggle")).toBeVisible({ timeout: 30_000 });
 }
@@ -95,11 +69,11 @@ async function waitForStableZero(locator: Locator, stableMs = 3_000, timeout = 1
   throw new Error(`metric did not remain at zero for ${stableMs}ms within ${timeout}ms`);
 }
 
-test.describe("live stream controls @live", () => {
+test.describe("live stream controls @stream-live", () => {
   test.describe.configure({ mode: "serial" });
 
   test.beforeEach(async ({ page }) => {
-    await seedAuth(page);
+    await seedLiveAuth(page);
   });
 
   test("audio + video stream reaches live stats", async ({ page }) => {

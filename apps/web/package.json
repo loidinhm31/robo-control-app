@@ -8,7 +8,8 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "check-types": "tsc --noEmit",
-    "test:e2e:stream-live": "playwright test -c ./playwright.config.ts --grep @live"
+    "test:e2e:stream-live": "playwright test -c ./playwright.config.ts --grep @stream-live --output test-results/stream-live",
+    "test:e2e:edge-voice-live": "PLAYWRIGHT_USE_FAKE_MEDIA=true playwright test -c ./playwright.config.ts --grep @edge-voice-live --output test-results/edge-voice-live"
   },
   "dependencies": {
     "@robo-fleet/shared": "workspace:*",

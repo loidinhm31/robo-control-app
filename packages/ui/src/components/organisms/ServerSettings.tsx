@@ -60,6 +60,7 @@ export const ServerSettings: React.FC<ServerSettingsProps> = ({
           className="p-2 rounded text-slate-400 hover:text-syntax-cyan hover:bg-slate-800/60 transition-colors cursor-pointer"
           title="Server settings"
           aria-label="Server settings"
+          data-testid="server-settings-trigger"
         >
           <Settings className="w-4 h-4" />
         </button>
@@ -141,6 +142,7 @@ export const ServerSettings: React.FC<ServerSettingsProps> = ({
               <span className="text-slate-600">:</span>
             </label>
             <input
+              data-testid="server-settings-url"
               type="text"
               value={draftUrl}
               onChange={(e) => setDraftUrl(e.target.value)}
@@ -174,6 +176,7 @@ export const ServerSettings: React.FC<ServerSettingsProps> = ({
               <span className="text-slate-600"> {"}"}</span>
             </label>
             <input
+              data-testid="server-settings-username"
               type="text"
               value={draftUsername}
               onChange={(e) => setDraftUsername(e.target.value)}
@@ -183,6 +186,7 @@ export const ServerSettings: React.FC<ServerSettingsProps> = ({
               className="glass-input w-full px-3 py-2 rounded text-sm font-mono focus:outline-none focus:ring-2 focus:ring-cyan-400/50"
             />
             <input
+              data-testid="server-settings-password"
               type="password"
               value={draftPassword}
               onChange={(e) => setDraftPassword(e.target.value)}
@@ -199,6 +203,7 @@ export const ServerSettings: React.FC<ServerSettingsProps> = ({
               <button
                 onClick={handleConnect}
                 disabled={!draftUrl.trim()}
+                data-testid="server-settings-connect"
                 className="btn-info flex-1 px-3 py-2 rounded flex items-center justify-center gap-1.5 text-sm font-mono font-bold disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
               >
                 <Plug className="w-3.5 h-3.5" />
@@ -210,6 +215,7 @@ export const ServerSettings: React.FC<ServerSettingsProps> = ({
               <Popover.Close asChild>
                 <button
                   onClick={onDisconnect}
+                  data-testid="server-settings-disconnect"
                   className="btn-destructive px-3 py-2 rounded flex items-center justify-center gap-1.5 text-sm font-mono font-bold cursor-pointer"
                 >
                   <Unplug className="w-3.5 h-3.5" />
