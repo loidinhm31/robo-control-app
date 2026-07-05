@@ -39,7 +39,7 @@ robo-control-app/
 | `src/components/pages/RoboRoverControl.tsx` | 895 | Main page controller, Socket.IO connection, all state, command emission |
 | `src/styles/globals.css` | 372 | Tailwind v4 theme, glass-morphic utilities, semantic colors |
 | `src/components/LocationMap.tsx` | 449 | 2D canvas path visualization, zoom/pan, wheel kinematics |
-| `src/components/VoiceControls.tsx` | 432 | TTS command playback, microphone STT, Web Audio API scheduling |
+| `src/components/VoiceControls.tsx` | 432 | TTS playback, authoritative config sync, walkie alerts, browser STT |
 | `src/components/FloatingMetrics.tsx` | 323 | Performance panel: latency, FPS, memory, CPU per-robot |
 | `src/components/TranscriptionDisplay.tsx` | 193 | Speech recognition result display |
 | `src/types/index.ts` | 187 | Shared type exports |
@@ -86,7 +86,7 @@ robo-control-app/
 ### Features (Full Features)
 - `CameraViewer` — Live JPEG streaming + detection overlays + click-to-track
 - `LocationMap` — 2D canvas rover path visualization
-- `VoiceControls` — Manual TTS, walkie-talkie controls, browser-private voice command capture, authoritative STT status/profile display
+- `VoiceControls` — Manual TTS, walkie-talkie controls, browser-private voice command capture, authoritative STT status/profile display, TTS config convergence, and voice alerts
 - `FloatingMetrics` — Floating performance metrics panel
 - `TranscriptionDisplay` — Fleet rover transcription history with rover badge, profile/language metadata, and null-safe confidence
 
@@ -99,7 +99,7 @@ robo-control-app/
 ### Socket.IO & Communication
 - `packages/shared/src/types/socket.ts` — Typed event maps, including `stt_status`, `voice_command_transcription`, `auth_error`, and `command_ack`
 - `packages/shared/src/types/voice.ts` — Shared STT/voice contract types and compile-time fixture verification
-- `packages/ui/src/components/pages/RoboRoverControl.tsx` — Socket.IO connection setup, browser-private vs rover-public transcription state, status replay handling
+- `packages/ui/src/components/pages/RoboRoverControl.tsx` — Socket.IO connection setup, browser-private vs rover-public transcription state, TTS config/alert replay handling
 
 ### Commands & Telemetry
 - `src/types/commands.ts` — WebRoverCommand, WebArmCommand, TrackingCommand

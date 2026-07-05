@@ -42,6 +42,11 @@ import type {
   SttStatus,
   SystemMetrics,
   TrackingTelemetry,
+  TtsCommandAck,
+  TtsCommandResult,
+  TtsConfigState,
+  TtsConfigUpdate,
+  VoiceStatus,
   WebArmCommand,
   WebRoverCommand,
 } from "@robo-fleet/shared/types";
@@ -136,6 +141,12 @@ export const RoboRoverControl: React.FC<RoboRoverControlProps> = ({
     SpeechTranscription[]
   >([]);
   const [sttStatus, setSttStatus] = useState<SttStatus | null>(null);
+  const [ttsConfigState, setTtsConfigState] = useState<TtsConfigState | null>(null);
+  const [voiceStatuses, setVoiceStatuses] = useState<Map<string, VoiceStatus>>(
+    new Map(),
+  );
+  const [lastTtsAck, setLastTtsAck] = useState<TtsCommandAck | null>(null);
+  const [lastTtsResult, setLastTtsResult] = useState<TtsCommandResult | null>(null);
   const [isAudioActive, setIsAudioActive] = useState(false);
 
   // Performance metrics state - per robot (entity_id -> metrics)
@@ -173,12 +184,18 @@ export const RoboRoverControl: React.FC<RoboRoverControlProps> = ({
 
   const [authError, setAuthError] = useState<string | null>(null);
   const [sessionActive, setSessionActive] = useState(false);
+  const [activeSocket, setActiveSocket] = useState<RoboFleetSocket | null>(null);
 
   const socketRef = useRef<RoboFleetSocket | null>(null);
+  const selectedEntityIdRef = useRef<string | null>(null);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastCommandTime = useRef<number>(0);
   const lastUpdateTime = useRef<number>(Date.now());
   const MAX_LOGS = 50;
+
+  useEffect(() => {
+    selectedEntityIdRef.current = fleetStatus?.selected_entity ?? null;
+  }, [fleetStatus?.selected_entity]);
 
   const scheduleRefresh = useCallback((token: string) => {
     if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
@@ -216,6 +233,172 @@ export const RoboRoverControl: React.FC<RoboRoverControlProps> = ({
     }
   }, []);
 
+  const clearVoiceUiState = useCallback(() => {
+    setTtsConfigState(null);
+    setVoiceStatuses(new Map());
+    setLastTtsAck(null);
+    setLastTtsResult(null);
+  }, []);
+
+  const handleAuthToken = useCallback((token: string) => {
+    try { sessionStorage.setItem(TOKEN_STORAGE_KEY, token); } catch { /* private browsing */ }
+    setSessionActive(true);
+    setAuthError(null);
+    scheduleRefresh(token);
+  }, [scheduleRefresh]);
+
+  const handleAuthError = useCallback((event: AuthErrorEvent) => {
+    const messages: Record<string, string> = {
+      invalid_credentials: "Authentication failed. Check username and password.",
+      token_expired: "Session expired. Please reconnect.",
+      rate_limited: "Too many attempts. Please wait.",
+      idle_timeout: "Disconnected due to inactivity.",
+    };
+    setSessionActive(false);
+    setBrowserTranscriptions([]);
+    clearVoiceUiState();
+    if (event.reason === "token_expired" || event.reason === "idle_timeout") {
+      try { sessionStorage.removeItem(TOKEN_STORAGE_KEY); } catch { /* private browsing */ }
+    }
+    setAuthError(messages[event.reason] ?? "Authentication error.");
+    addLog(messages[event.reason] ?? "Auth error", "error");
+  }, [addLog, clearVoiceUiState]);
+
+  const handleSocketConnect = useCallback(() => {
+    addLog(`Connected (ID: ${socketRef.current?.id ?? "unknown"})`, "success");
+    setAuthError(null);
+    setConnection((prev) => ({
+      ...prev,
+      isConnected: true,
+      clientId: socketRef.current?.id ?? null,
+    }));
+  }, [addLog]);
+
+  const handleSocketDisconnect = useCallback((reason: string) => {
+    addLog(`Disconnected: ${reason}`, "warning");
+    setSessionActive(false);
+    setSttStatus(null);
+    setIsAudioActive(false);
+    setBrowserTranscriptions([]);
+    clearVoiceUiState();
+    setConnection((prev) => ({
+      ...prev,
+      isConnected: false,
+      clientId: null,
+    }));
+  }, [addLog, clearVoiceUiState]);
+
+  const handleSocketConnectError = useCallback((error: { message: string }) => {
+    addLog(`Connection error: ${error.message}`, "error");
+    if (error.message.includes("authentication") || error.message.includes("auth")) {
+      addLog("Authentication failed - check credentials", "error");
+    }
+  }, [addLog]);
+
+  const handleCommandAck = useCallback(() => {
+    setConnection((prev) => ({
+      ...prev,
+      commandsReceived: prev.commandsReceived + 1,
+    }));
+  }, []);
+
+  const handleServoTelemetry = useCallback((data: TrackingTelemetry) => {
+    setServoTelemetry(data);
+  }, []);
+
+  const handleTranscription = useCallback((data: SpeechTranscription) => {
+    if (data.source_kind !== "rover" || !data.entity_id) {
+      addLog("Ignored invalid non-rover fleet transcription", "warning");
+      return;
+    }
+    setRoverTranscriptions((history) => prependTranscription(history, data));
+    const confidenceLabel =
+      data.confidence == null ? "no confidence" : `${(data.confidence * 100).toFixed(0)}%`;
+    addLog(
+      `Rover transcription [${data.entity_id}]: "${data.text}" (${confidenceLabel})`,
+      "info",
+    );
+  }, [addLog]);
+
+  const handleVoiceCommandTranscription = useCallback((data: SpeechTranscription) => {
+    if (data.source_kind !== "browser" || data.entity_id !== null) {
+      addLog("Ignored invalid non-browser private transcription", "warning");
+      return;
+    }
+    setBrowserTranscriptions((history) => prependTranscription(history, data));
+    addLog("Private browser command received", "info");
+  }, [addLog]);
+
+  const handleSttStatus = useCallback((status: SttStatus) => {
+    setSttStatus(status);
+    addLog(
+      `Central STT ${status.state}: ${status.profile}`,
+      status.state === "error" ? "error" : "info",
+    );
+  }, [addLog]);
+
+  const handleTtsConfigState = useCallback((state: TtsConfigState) => {
+    setTtsConfigState(state);
+    setVoiceStatuses(
+      new Map(state.rovers.map((status) => [status.entity_id, status])),
+    );
+  }, []);
+
+  const handleVoiceStatus = useCallback((status: VoiceStatus) => {
+    setVoiceStatuses((prev) => {
+      const next = new Map(prev);
+      next.set(status.entity_id, status);
+      return next;
+    });
+  }, []);
+
+  const handleTtsCommandAck = useCallback((ack: TtsCommandAck) => {
+    setLastTtsAck(ack);
+    if (ack.state === "rejected") {
+      addLog(
+        `TTS rejected for ${ack.target_entity_id}: ${ack.reason_code ?? "unknown reason"}`,
+        "warning",
+      );
+    }
+  }, [addLog]);
+
+  const handleTtsCommandResult = useCallback((result: TtsCommandResult) => {
+    setLastTtsResult(result);
+    if (result.state === "completed") {
+      addLog(`TTS completed on ${result.entity_id}`, "success");
+      return;
+    }
+    const logType = result.state === "failed" ? "error" : "warning";
+    addLog(
+      `TTS ${result.state} on ${result.entity_id}: ${result.reason_code ?? "unknown reason"}`,
+      logType,
+    );
+  }, [addLog]);
+
+  const handlePerformanceMetrics = useCallback((data: SystemMetrics) => {
+    if (data.entity_id) {
+      setPerformanceMetrics((prev) => {
+        const newMap = new Map(prev);
+        newMap.set(data.entity_id!, data);
+        return newMap;
+      });
+      return;
+    }
+
+    const selectedEntityId = selectedEntityIdRef.current;
+    if (!selectedEntityId) return;
+    setPerformanceMetrics((prev) => {
+      const newMap = new Map(prev);
+      newMap.set(selectedEntityId, data);
+      return newMap;
+    });
+  }, []);
+
+  const handleFleetStatus = useCallback((data: FleetStatus) => {
+    setFleetStatus(data);
+    addLog(`Fleet status: Selected rover is ${data.selected_entity}`, "info");
+  }, [addLog]);
+
   // Connect to Socket.IO server
   const connect = useCallback(() => {
     if (socketRef.current?.connected) {
@@ -238,130 +421,84 @@ export const RoboRoverControl: React.FC<RoboRoverControlProps> = ({
 
     setSessionActive(false);
     setSttStatus(null);
+    clearVoiceUiState();
+    if (socketRef.current && !socketRef.current.connected) {
+      socketRef.current.disconnect();
+      socketRef.current = null;
+      setActiveSocket(null);
+    }
     const socket = io(serverUrl, {
+      autoConnect: false,
       transports: ["websocket", "polling"],
       reconnection: true,
       reconnectionDelay: 1000,
       reconnectionAttempts: 5,
       auth: connectAuth,
     }) as RoboFleetSocket;
-
-    socket.on("auth_token", (token: string) => {
-      try { sessionStorage.setItem(TOKEN_STORAGE_KEY, token); } catch { /* private browsing */ }
-      setSessionActive(true);
-      setAuthError(null);
-      scheduleRefresh(token);
-    });
-
-    socket.on("auth_error", (event: AuthErrorEvent) => {
-      const messages: Record<string, string> = {
-        invalid_credentials: "Authentication failed. Check username and password.",
-        token_expired: "Session expired. Please reconnect.",
-        rate_limited: "Too many attempts. Please wait.",
-        idle_timeout: "Disconnected due to inactivity.",
-      };
-      setSessionActive(false);
-      setBrowserTranscriptions([]);
-      if (event.reason === "token_expired" || event.reason === "idle_timeout") {
-        try { sessionStorage.removeItem(TOKEN_STORAGE_KEY); } catch { /* private browsing */ }
-        setSessionActive(false);
-      }
-      setAuthError(messages[event.reason] ?? "Authentication error.");
-      addLog(messages[event.reason] ?? "Auth error", "error");
-    });
-
-    socket.on("connect", () => {
-      addLog(`Connected (ID: ${socket.id})`, "success");
-      setAuthError(null);
-      setConnection((prev) => ({
-        ...prev,
-        isConnected: true,
-        clientId: socket.id as string,
-      }));
-    });
-
-    socket.on("disconnect", (reason) => {
-      addLog(`Disconnected: ${reason}`, "warning");
-      setSessionActive(false);
-      setSttStatus(null);
-      setIsAudioActive(false);
-      setBrowserTranscriptions([]);
-      setConnection((prev) => ({
-        ...prev,
-        isConnected: false,
-        clientId: null,
-      }));
-    });
-
-    socket.on("connect_error", (error) => {
-      addLog(`Connection error: ${error.message}`, "error");
-      if (error.message.includes("authentication") || error.message.includes("auth")) {
-        addLog("Authentication failed - check credentials", "error");
-      }
-    });
-
-    socket.on("command_ack", () => {
-      setConnection((prev) => ({
-        ...prev,
-        commandsReceived: prev.commandsReceived + 1,
-      }));
-    });
-
-    socket.on("servo_telemetry", (data: TrackingTelemetry) => {
-      setServoTelemetry(data);
-    });
-
-    socket.on("transcription", (data: SpeechTranscription) => {
-      if (data.source_kind !== "rover" || !data.entity_id) {
-        addLog("Ignored invalid non-rover fleet transcription", "warning");
-        return;
-      }
-      setRoverTranscriptions((history) => prependTranscription(history, data));
-      const confidenceLabel =
-        data.confidence == null ? "no confidence" : `${(data.confidence * 100).toFixed(0)}%`;
-      addLog(
-        `Rover transcription [${data.entity_id}]: "${data.text}" (${confidenceLabel})`,
-        "info",
-      );
-    });
-
-    socket.on("voice_command_transcription", (data: SpeechTranscription) => {
-      if (data.source_kind !== "browser" || data.entity_id !== null) {
-        addLog("Ignored invalid non-browser private transcription", "warning");
-        return;
-      }
-      setBrowserTranscriptions((history) => prependTranscription(history, data));
-      addLog("Private browser command received", "info");
-    });
-
-    socket.on("stt_status", (status: SttStatus) => {
-      setSttStatus(status);
-      addLog(`Central STT ${status.state}: ${status.profile}`, status.state === "error" ? "error" : "info");
-    });
-
-    socket.on("performance_metrics", (data: SystemMetrics) => {
-      if (data.entity_id) {
-        setPerformanceMetrics((prev) => {
-          const newMap = new Map(prev);
-          newMap.set(data.entity_id!, data);
-          return newMap;
-        });
-      } else if (fleetStatus?.selected_entity) {
-        setPerformanceMetrics((prev) => {
-          const newMap = new Map(prev);
-          newMap.set(fleetStatus.selected_entity, data);
-          return newMap;
-        });
-      }
-    });
-
-    socket.on("fleet_status", (data: FleetStatus) => {
-      setFleetStatus(data);
-      addLog(`Fleet status: Selected rover is ${data.selected_entity}`, "info");
-    });
-
     socketRef.current = socket;
-  }, [serverUrl, socketAuth, addLog, fleetStatus?.selected_entity, scheduleRefresh]);
+    setActiveSocket(socket);
+  }, [serverUrl, socketAuth, addLog, clearVoiceUiState]);
+
+  useEffect(() => {
+    if (!activeSocket) return;
+
+    activeSocket.on("auth_token", handleAuthToken);
+    activeSocket.on("auth_error", handleAuthError);
+    activeSocket.on("connect", handleSocketConnect);
+    activeSocket.on("disconnect", handleSocketDisconnect);
+    activeSocket.on("connect_error", handleSocketConnectError);
+    activeSocket.on("command_ack", handleCommandAck);
+    activeSocket.on("servo_telemetry", handleServoTelemetry);
+    activeSocket.on("transcription", handleTranscription);
+    activeSocket.on("voice_command_transcription", handleVoiceCommandTranscription);
+    activeSocket.on("stt_status", handleSttStatus);
+    activeSocket.on("tts_config_state", handleTtsConfigState);
+    activeSocket.on("voice_status", handleVoiceStatus);
+    activeSocket.on("tts_command_ack", handleTtsCommandAck);
+    activeSocket.on("tts_command_result", handleTtsCommandResult);
+    activeSocket.on("performance_metrics", handlePerformanceMetrics);
+    activeSocket.on("fleet_status", handleFleetStatus);
+    if (!activeSocket.connected) {
+      activeSocket.connect();
+    }
+
+    return () => {
+      activeSocket.off("auth_token", handleAuthToken);
+      activeSocket.off("auth_error", handleAuthError);
+      activeSocket.off("connect", handleSocketConnect);
+      activeSocket.off("disconnect", handleSocketDisconnect);
+      activeSocket.off("connect_error", handleSocketConnectError);
+      activeSocket.off("command_ack", handleCommandAck);
+      activeSocket.off("servo_telemetry", handleServoTelemetry);
+      activeSocket.off("transcription", handleTranscription);
+      activeSocket.off("voice_command_transcription", handleVoiceCommandTranscription);
+      activeSocket.off("stt_status", handleSttStatus);
+      activeSocket.off("tts_config_state", handleTtsConfigState);
+      activeSocket.off("voice_status", handleVoiceStatus);
+      activeSocket.off("tts_command_ack", handleTtsCommandAck);
+      activeSocket.off("tts_command_result", handleTtsCommandResult);
+      activeSocket.off("performance_metrics", handlePerformanceMetrics);
+      activeSocket.off("fleet_status", handleFleetStatus);
+    };
+  }, [
+    activeSocket,
+    handleAuthError,
+    handleAuthToken,
+    handleCommandAck,
+    handleFleetStatus,
+    handlePerformanceMetrics,
+    handleServoTelemetry,
+    handleSocketConnect,
+    handleSocketConnectError,
+    handleSocketDisconnect,
+    handleSttStatus,
+    handleTranscription,
+    handleTtsCommandAck,
+    handleTtsCommandResult,
+    handleTtsConfigState,
+    handleVoiceCommandTranscription,
+    handleVoiceStatus,
+  ]);
 
   // Disconnect from Socket.IO server
   const disconnect = useCallback(() => {
@@ -370,12 +507,15 @@ export const RoboRoverControl: React.FC<RoboRoverControlProps> = ({
       socketRef.current = null;
       addLog("Manually disconnected", "info");
     }
+    setActiveSocket(null);
     if (refreshTimerRef.current) {
       clearTimeout(refreshTimerRef.current);
       refreshTimerRef.current = null;
     }
     setSessionActive(false);
-  }, [addLog]);
+    setSttStatus(null);
+    clearVoiceUiState();
+  }, [addLog, clearVoiceUiState]);
 
   // Select rover from fleet
   const selectRover = useCallback(
@@ -448,6 +588,30 @@ export const RoboRoverControl: React.FC<RoboRoverControlProps> = ({
     setIsAudioActive(false);
     addLog("Audio capture stopped", "info");
   }, [connection.isConnected, addLog]);
+
+  const sendTtsCommand = useCallback((text: string) => {
+    if (!connection.isConnected || !socketRef.current) {
+      addLog("Cannot send TTS - not connected", "error");
+      return;
+    }
+    socketRef.current.emit("tts_command", { text });
+    setConnection((prev) => ({
+      ...prev,
+      commandsSent: prev.commandsSent + 1,
+    }));
+  }, [addLog, connection.isConnected]);
+
+  const sendTtsConfigUpdate = useCallback((update: TtsConfigUpdate) => {
+    if (!connection.isConnected || !socketRef.current) {
+      addLog("Cannot update TTS config - not connected", "error");
+      return;
+    }
+    socketRef.current.emit("tts_config_update", update);
+    setConnection((prev) => ({
+      ...prev,
+      commandsSent: prev.commandsSent + 1,
+    }));
+  }, [addLog, connection.isConnected]);
 
   // Update joint position
   const updateJoint = useCallback((joint: keyof JointPositions, value: number) => {
@@ -778,7 +942,7 @@ export const RoboRoverControl: React.FC<RoboRoverControlProps> = ({
             {showCamera && (
               <CameraViewer
                 isConnected={connection.isConnected}
-                socket={socketRef.current}
+                socket={activeSocket}
                 onClose={() => setShowCamera(false)}
               />
             )}
@@ -826,12 +990,18 @@ export const RoboRoverControl: React.FC<RoboRoverControlProps> = ({
 
           {/* Voice Communication Controls */}
           <VoiceControls
-            socket={socketRef.current}
+            socket={activeSocket}
             isConnected={connection.isConnected}
             isAuthenticated={sessionActive}
             sttStatus={sttStatus}
             selectedEntityId={fleetStatus?.selected_entity ?? null}
             browserTranscriptions={browserTranscriptions}
+            ttsConfigState={ttsConfigState}
+            voiceStatuses={[...voiceStatuses.values()]}
+            lastTtsAck={lastTtsAck}
+            lastTtsResult={lastTtsResult}
+            onSendTts={sendTtsCommand}
+            onUpdateTtsConfig={sendTtsConfigUpdate}
             onLog={addLog}
           />
 
@@ -1003,7 +1173,7 @@ export const RoboRoverControl: React.FC<RoboRoverControlProps> = ({
       </div>
 
       {/* Floating Performance Metrics */}
-      <FloatingMetrics metrics={performanceMetrics} socket={socketRef.current} />
+      <FloatingMetrics metrics={performanceMetrics} socket={activeSocket} />
     </div>
   );
 };

@@ -9,7 +9,12 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
-import type { SpeechTranscription, SttStatus } from "@robo-fleet/shared/types";
+import type {
+  SpeechTranscription,
+  SttStatus,
+  TtsConfigState,
+  VoiceStatus,
+} from "@robo-fleet/shared/types";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 type SocketHandler = (...args: never[]) => void;
@@ -83,6 +88,46 @@ function privateTranscription(text: string, utteranceId: string): SpeechTranscri
   };
 }
 
+function voiceStatus(
+  entityId: string,
+  revision: number,
+  state: VoiceStatus["state"] = "ready",
+): VoiceStatus {
+  return {
+    entity_id: entityId,
+    state,
+    applied_revision: revision,
+    applied_config: {
+      language: "en",
+      speaker_id: 5,
+      speed: 1.0,
+      num_steps: 8,
+      volume: 0.8,
+    },
+    timestamp: 1_720_000_000_000 + revision,
+  };
+}
+
+function configState(
+  revision: number,
+  statuses: VoiceStatus[],
+): TtsConfigState {
+  return {
+    desired_revision: revision,
+    desired_config: {
+      language: "en",
+      speaker_id: 5,
+      speed: 1.0,
+      num_steps: 8,
+      volume: 0.8,
+    },
+    applied_rovers: statuses.filter((status) => status.applied_revision === revision).length,
+    active_rovers: statuses.length,
+    rovers: statuses,
+    timestamp: 1_720_000_000_100 + revision,
+  };
+}
+
 describe("RoboRoverControl STT session boundaries", () => {
   beforeEach(() => {
     localStorage.clear();
@@ -144,5 +189,56 @@ describe("RoboRoverControl STT session boundaries", () => {
     expect(await screen.findByText("private command two")).toBeTruthy();
     act(() => socket.dispatch("auth_error", { reason: "token_expired" }));
     await waitFor(() => expect(screen.queryByText("private command two")).toBeNull());
+  });
+
+  it("hydrates authoritative TTS state on reconnect and clears stale voice UI on disconnect", async () => {
+    render(<RoboRoverControl />);
+    await waitFor(() => expect(socketMock.io).toHaveBeenCalledTimes(1));
+    const socket = socketMock.current!;
+
+    act(() => {
+      socket.dispatch("connect");
+      socket.dispatch("auth_token", "header.payload.signature");
+      socket.dispatch("fleet_status", {
+        selected_entity: "rover-a",
+        fleet_roster: ["rover-a"],
+        timestamp: Date.now(),
+      });
+      socket.dispatch("tts_config_state", configState(4, [voiceStatus("rover-a", 4)]));
+      socket.dispatch("voice_status", voiceStatus("rover-a", 4));
+    });
+
+    fireEvent.click(screen.getByText("Voice"));
+    expect(await screen.findByText("Desired R4")).toBeTruthy();
+    expect(screen.getByText("Applied 1/1")).toBeTruthy();
+
+    act(() => {
+      socket.dispatch("tts_command_result", {
+        command_id: "cmd-1",
+        entity_id: "rover-a",
+        state: "interrupted",
+        timestamp: Date.now(),
+        reason_code: "interrupted_by_walkie",
+        detail: "live walkie started",
+      });
+    });
+    expect(await screen.findByText("Walkie-talkie took priority")).toBeTruthy();
+
+    act(() => socket.dispatch("disconnect", "transport close"));
+    await waitFor(() =>
+      expect(
+        screen.getByText("Waiting for the server to publish the authoritative TTS configuration."),
+      ).toBeTruthy()
+    );
+    expect(screen.queryByText("Walkie-talkie took priority")).toBeNull();
+
+    act(() => {
+      socket.connected = true;
+      socket.dispatch("connect");
+      socket.dispatch("auth_token", "header.payload.signature");
+      socket.dispatch("tts_config_state", configState(5, [voiceStatus("rover-a", 5)]));
+      socket.dispatch("voice_status", voiceStatus("rover-a", 5, "speaking"));
+    });
+    expect(await screen.findByText("Desired R5")).toBeTruthy();
   });
 });

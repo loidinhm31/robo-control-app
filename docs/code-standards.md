@@ -38,7 +38,7 @@ pages/          Full page controllers (RoboRoverControl, URDFVisualizationPage)
 - Atoms → pure presentation, no business logic
 - Molecules → minimal composition, reusable across features
 - Organisms → feature-scoped, can contain state (but prefer lifting to page)
-- Features → self-contained features (camera, voice, map, etc.)
+- Features → self-contained features (camera, voice, map, etc.); split large feature UIs into focused subcomponents when config/alerts/history diverge
 - Pages → main controllers, hold Socket.IO connection + main state
 
 **Export pattern:**
@@ -79,6 +79,7 @@ export type { BatteryIndicatorProps } from './BatteryIndicator';
 - `types/commands.ts` — WebRoverCommand, WebArmCommand, TrackingCommand
 - `types/telemetry.ts` — RoverTelemetry, ArmTelemetry, SystemMetrics
 - `types/voice.ts` — SpeechTranscription, TTSMessage, AudioFrame
+- `VoiceControls` may be decomposed into `*ConfigCard`, `*AlertRegion`, `*CommandPanel` when the feature needs separate config, alerts, and capture UX
 - `types/fleet.ts` — FleetStatus, RoverStatus, RoverHealth
 - `types/ui.ts` — UI-specific types (ConnectionState, LogEntry)
 - `types/index.ts` — Re-export barrel file

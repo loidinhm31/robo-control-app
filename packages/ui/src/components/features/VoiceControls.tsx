@@ -2,26 +2,35 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import type {
   SpeechTranscription,
   SttStatus,
+  TtsCommandAck,
+  TtsCommandResult,
+  TtsConfigState,
+  TtsConfigUpdate,
+  TtsLanguage,
+  TtsRuntimeConfig,
+  VoiceStatus,
 } from "@robo-fleet/shared/types";
-import {
-  AlertCircle,
-  ChevronDown,
-  Headphones,
-  Radio,
-  Send,
-  Shield,
-  Volume2,
-} from "lucide-react";
+import { AlertCircle, ChevronDown, Headphones, Send, Shield, Volume2 } from "lucide-react";
 import {
   useBrowserVoiceCapture,
   type BrowserVoiceSocket,
 } from "../../hooks/use-browser-voice-capture";
 import { DraggablePanel } from "../organisms";
+import { StatusBadge } from "../atoms";
 import { InputWithAction } from "../molecules";
-import { IconBadge, StatusBadge } from "../atoms";
 import { VoiceCommandPanel } from "./voice-command-panel";
+import {
+  buildAckAlert,
+  buildResultAlert,
+  cloneTtsConfig,
+  type VoiceAlertItem,
+} from "./voice-controls-helpers";
+import { VoiceAlertRegion } from "./voice-alert-region";
+import { VoiceConfigCard } from "./voice-config-card";
 
 const WALKIE_PROCESSOR_NAME = "walkie-talkie-capture";
+const TTS_DISABLE_DELAY_MS = 300;
+const TTS_CONFIG_DEBOUNCE_MS = 250;
 
 interface VoiceControlsProps {
   socket: BrowserVoiceSocket | null;
@@ -30,6 +39,12 @@ interface VoiceControlsProps {
   sttStatus: SttStatus | null;
   selectedEntityId: string | null;
   browserTranscriptions: readonly SpeechTranscription[];
+  ttsConfigState: TtsConfigState | null;
+  voiceStatuses: readonly VoiceStatus[];
+  lastTtsAck: TtsCommandAck | null;
+  lastTtsResult: TtsCommandResult | null;
+  onSendTts: (text: string) => void;
+  onUpdateTtsConfig: (update: TtsConfigUpdate) => void;
   onLog?: (
     message: string,
     type?: "info" | "success" | "error" | "warning",
@@ -114,6 +129,14 @@ function browserDisabledReason(
   return null;
 }
 
+function replaceAlert(
+  alerts: readonly VoiceAlertItem[],
+  nextAlert: VoiceAlertItem,
+): VoiceAlertItem[] {
+  return [nextAlert, ...alerts.filter((alert) => alert.id !== nextAlert.id)]
+    .slice(0, 3);
+}
+
 export const VoiceControls: React.FC<VoiceControlsProps> = ({
   socket,
   isConnected,
@@ -121,6 +144,12 @@ export const VoiceControls: React.FC<VoiceControlsProps> = ({
   sttStatus,
   selectedEntityId,
   browserTranscriptions,
+  ttsConfigState,
+  voiceStatuses,
+  lastTtsAck,
+  lastTtsResult,
+  onSendTts,
+  onUpdateTtsConfig,
   onLog,
 }) => {
   const [ttsText, setTtsText] = useState("");
@@ -130,12 +159,21 @@ export const VoiceControls: React.FC<VoiceControlsProps> = ({
   const [walkieAudioLevel, setWalkieAudioLevel] = useState(0);
   const [walkieError, setWalkieError] = useState<string | null>(null);
   const [isVisible, setIsVisible] = useState(false);
+  const [alerts, setAlerts] = useState<VoiceAlertItem[]>([]);
+  const [draftConfig, setDraftConfig] = useState<TtsRuntimeConfig | null>(null);
+  const [pendingRevision, setPendingRevision] = useState<number | null>(null);
+  const [pendingBaseRevision, setPendingBaseRevision] = useState<number | null>(null);
 
   const walkieResourcesRef = useRef<WalkieResources | null>(null);
   const walkieGenerationRef = useRef(0);
   const walkieStartPendingRef = useRef(false);
   const mountedRef = useRef(true);
   const ttsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const configDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const draftConfigRef = useRef<TtsRuntimeConfig | null>(null);
+  const ttsConfigStateRef = useRef<TtsConfigState | null>(ttsConfigState);
+  const pendingRevisionRef = useRef<number | null>(pendingRevision);
+  const pendingBaseRevisionRef = useRef<number | null>(pendingBaseRevision);
 
   const disabledReason = browserDisabledReason(
     isConnected,
@@ -150,22 +188,97 @@ export const VoiceControls: React.FC<VoiceControlsProps> = ({
     onLog,
   });
 
+  const selectedVoiceStatus = selectedEntityId == null
+    ? null
+    : voiceStatuses.find((status) => status.entity_id === selectedEntityId) ?? null;
+
+  const ttsDisabledReason = !isConnected
+    ? "Connect to the Orchestra server first."
+    : !isAuthenticated
+      ? "Wait for an authenticated session."
+      : isWalkieActive || isWalkieStarting
+        ? "Live walkie-talkie has priority over local TTS."
+        : null;
+
+  const pushAlert = useCallback((nextAlert: VoiceAlertItem | null): void => {
+    if (!nextAlert) return;
+    setAlerts((current) => replaceAlert(current, nextAlert));
+    onLog?.(
+      `${nextAlert.title}${nextAlert.entityId ? ` [${nextAlert.entityId}]` : ""}: ${nextAlert.message}`,
+      nextAlert.tone === "error" ? "error" : "warning",
+    );
+  }, [onLog]);
+
+  const clearSendTimer = useCallback((): void => {
+    if (ttsTimerRef.current) {
+      window.clearTimeout(ttsTimerRef.current);
+      ttsTimerRef.current = null;
+    }
+  }, []);
+
+  const clearConfigDebounce = useCallback((): void => {
+    if (configDebounceRef.current) {
+      window.clearTimeout(configDebounceRef.current);
+      configDebounceRef.current = null;
+    }
+  }, []);
+
+  const dispatchConfigUpdate = useCallback((config: TtsRuntimeConfig): void => {
+    const latestConfigState = ttsConfigStateRef.current;
+    if (!latestConfigState || !isConnected || !isAuthenticated) return;
+    const baseRevision = Math.max(
+      latestConfigState.desired_revision,
+      pendingRevisionRef.current ?? 0,
+    );
+    onUpdateTtsConfig({
+      base_revision: baseRevision,
+      config,
+    });
+    pendingBaseRevisionRef.current = baseRevision;
+    pendingRevisionRef.current = baseRevision + 1;
+    setPendingBaseRevision(baseRevision);
+    setPendingRevision(baseRevision + 1);
+  }, [isAuthenticated, isConnected, onUpdateTtsConfig]);
+
+  const updateDraftConfig = useCallback((
+    transform: (current: TtsRuntimeConfig) => TtsRuntimeConfig,
+    mode: "immediate" | "debounced",
+  ): void => {
+    const current = draftConfigRef.current ?? ttsConfigState?.desired_config;
+    if (!current) return;
+    const next = transform(cloneTtsConfig(current));
+    draftConfigRef.current = next;
+    setDraftConfig(next);
+    if (mode === "immediate") {
+      clearConfigDebounce();
+      dispatchConfigUpdate(next);
+      return;
+    }
+    clearConfigDebounce();
+    configDebounceRef.current = window.setTimeout(() => {
+      configDebounceRef.current = null;
+      dispatchConfigUpdate(next);
+    }, TTS_CONFIG_DEBOUNCE_MS);
+  }, [clearConfigDebounce, dispatchConfigUpdate, ttsConfigState]);
+
   const sendTTS = useCallback(
     (text: string): void => {
-      if (!isConnected || !socket?.connected || !text.trim()) {
-        onLog?.("Cannot send TTS - not connected or empty text", "error");
+      const trimmed = text.trim();
+      if (!trimmed) return;
+      if (ttsDisabledReason) {
+        onLog?.(ttsDisabledReason, "warning");
         return;
       }
-      if (ttsTimerRef.current) window.clearTimeout(ttsTimerRef.current);
+      clearSendTimer();
       setIsSendingTTS(true);
-      socket.emit("tts_command", { text: text.trim() });
-      onLog?.(`TTS: "${text.trim()}"`, "success");
+      onSendTts(trimmed);
+      onLog?.(`Queued rover speech: "${trimmed}"`, "info");
       ttsTimerRef.current = window.setTimeout(() => {
         setIsSendingTTS(false);
         ttsTimerRef.current = null;
-      }, 300);
+      }, TTS_DISABLE_DELAY_MS);
     },
-    [isConnected, onLog, socket],
+    [clearSendTimer, onLog, onSendTts, ttsDisabledReason],
   );
 
   const stopWalkieTalkie = useCallback(async (): Promise<void> => {
@@ -285,7 +398,6 @@ export const VoiceControls: React.FC<VoiceControlsProps> = ({
         }
         return;
       }
-      if (!resources) return;
       const activeResources = resources;
       const levelData = new Uint8Array(analyserNode.frequencyBinCount);
       const updateLevel = (): void => {
@@ -365,6 +477,68 @@ export const VoiceControls: React.FC<VoiceControlsProps> = ({
   ]);
 
   useEffect(() => {
+    draftConfigRef.current = draftConfig;
+  }, [draftConfig]);
+
+  useEffect(() => {
+    ttsConfigStateRef.current = ttsConfigState;
+  }, [ttsConfigState]);
+
+  useEffect(() => {
+    pendingRevisionRef.current = pendingRevision;
+  }, [pendingRevision]);
+
+  useEffect(() => {
+    pendingBaseRevisionRef.current = pendingBaseRevision;
+  }, [pendingBaseRevision]);
+
+  useEffect(() => {
+    if (!ttsConfigState) {
+      setDraftConfig(null);
+      draftConfigRef.current = null;
+      pendingRevisionRef.current = null;
+      pendingBaseRevisionRef.current = null;
+      setPendingRevision(null);
+      setPendingBaseRevision(null);
+      clearConfigDebounce();
+      return;
+    }
+
+    const authoritativeConfig = cloneTtsConfig(ttsConfigState.desired_config);
+    const hasDebouncedLocalDraft = configDebounceRef.current !== null;
+    const pendingResolved = pendingRevisionRef.current !== null && (
+      ttsConfigState.desired_revision >= pendingRevisionRef.current
+        || ttsConfigState.desired_revision === pendingBaseRevisionRef.current
+    );
+
+    if (
+      draftConfigRef.current === null
+      || pendingResolved
+      || (!hasDebouncedLocalDraft && pendingRevisionRef.current === null)
+    ) {
+      setDraftConfig(authoritativeConfig);
+      draftConfigRef.current = authoritativeConfig;
+    }
+
+    if (pendingResolved) {
+      pendingRevisionRef.current = null;
+      pendingBaseRevisionRef.current = null;
+      setPendingRevision(null);
+      setPendingBaseRevision(null);
+      clearConfigDebounce();
+    }
+  }, [
+    clearConfigDebounce,
+    ttsConfigState,
+  ]);
+
+  useEffect(() => {
+    if (!isConnected || !isAuthenticated || ttsConfigState === null) {
+      setAlerts([]);
+    }
+  }, [isAuthenticated, isConnected, ttsConfigState]);
+
+  useEffect(() => {
     if (!isConnected) void stopWalkieTalkie();
   }, [isConnected, stopWalkieTalkie]);
 
@@ -372,27 +546,39 @@ export const VoiceControls: React.FC<VoiceControlsProps> = ({
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
-      if (ttsTimerRef.current) window.clearTimeout(ttsTimerRef.current);
+      clearSendTimer();
+      clearConfigDebounce();
       void stopWalkieTalkie();
     };
-  }, [stopWalkieTalkie]);
+  }, [clearConfigDebounce, clearSendTimer, stopWalkieTalkie]);
 
-  const activeMode = browserCapture.isCapturing
-    ? "Commands"
-    : isWalkieActive
-      ? "Walkie"
-      : null;
+  useEffect(() => {
+    if (lastTtsAck?.state === "rejected") {
+      clearSendTimer();
+      setIsSendingTTS(false);
+    }
+    pushAlert(buildAckAlert(lastTtsAck));
+  }, [clearSendTimer, lastTtsAck, pushAlert]);
+
+  useEffect(() => {
+    if (lastTtsResult && lastTtsResult.state !== "completed") {
+      clearSendTimer();
+      setIsSendingTTS(false);
+    }
+    pushAlert(buildResultAlert(lastTtsResult));
+  }, [clearSendTimer, lastTtsResult, pushAlert]);
+
   const collapsedContent = (
-    <button className="group flex items-center gap-2 px-3 py-1.5 bg-slate-900/95 backdrop-blur-md border border-slate-700/50 rounded-full shadow-lg hover:shadow-xl transition-all hover:scale-105 drag-handle cursor-move">
-      <Volume2 className="w-3.5 h-3.5 text-orange-400" />
-      <span className="text-[10px] font-bold text-white uppercase tracking-wide">Voice</span>
-      <ChevronDown className="w-3 h-3 text-slate-400 group-hover:text-slate-300" />
+    <button className="group flex items-center gap-2 rounded-full border border-slate-700/50 bg-slate-900/95 px-3 py-1.5 shadow-lg backdrop-blur-md transition-all hover:scale-105 hover:shadow-xl drag-handle cursor-move">
+      <Volume2 className="h-3.5 w-3.5 text-orange-400" />
+      <span className="text-[10px] font-bold uppercase tracking-wide text-white">Voice</span>
+      <ChevronDown className="h-3 w-3 text-slate-400 group-hover:text-slate-300" />
     </button>
   );
 
   return (
     <DraggablePanel
-      title="VOICE COMMUNICATION"
+      title="VOICE CONTROL"
       isVisible={isVisible}
       onToggleVisible={() => setIsVisible(!isVisible)}
       initialPosition={{ x: 15, y: 55 }}
@@ -403,48 +589,83 @@ export const VoiceControls: React.FC<VoiceControlsProps> = ({
     >
       <div className="space-y-3">
         {!isConnected && (
-          <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-2 flex items-center gap-2">
-            <AlertCircle className="w-4 h-4 text-yellow-400" />
+          <div className="flex items-center gap-2 rounded-lg border border-yellow-500/30 bg-yellow-500/10 p-2">
+            <AlertCircle className="h-4 w-4 text-yellow-400" />
             <span className="text-xs text-yellow-400">Not connected to server</span>
           </div>
         )}
 
         {walkieError && (
-          <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-2 flex items-center gap-2">
-            <Shield className="w-4 h-4 text-red-400" />
+          <div className="flex items-center gap-2 rounded-lg border border-red-500/30 bg-red-500/10 p-2">
+            <Shield className="h-4 w-4 text-red-400" />
             <span className="text-xs text-red-400">{walkieError}</span>
           </div>
         )}
 
+        <VoiceAlertRegion
+          alerts={alerts}
+          onDismiss={(id) => {
+            setAlerts((current) => current.filter((alert) => alert.id !== id));
+          }}
+        />
+
+        <VoiceConfigCard
+          activeRovers={ttsConfigState?.active_rovers ?? 0}
+          appliedRovers={ttsConfigState?.applied_rovers ?? 0}
+          config={draftConfig}
+          desiredRevision={ttsConfigState?.desired_revision ?? null}
+          pendingRevision={pendingRevision}
+          selectedStatus={selectedVoiceStatus}
+          disabled={!isConnected || !isAuthenticated || ttsConfigState === null}
+          onLanguageChange={(language: TtsLanguage) => {
+            updateDraftConfig((current) => ({ ...current, language }), "immediate");
+          }}
+          onSpeakerChange={(speakerId: number) => {
+            updateDraftConfig((current) => ({ ...current, speaker_id: speakerId }), "immediate");
+          }}
+          onQualityChange={(numSteps: number) => {
+            updateDraftConfig((current) => ({ ...current, num_steps: numSteps }), "immediate");
+          }}
+          onSpeedChange={(speed: number) => {
+            updateDraftConfig((current) => ({ ...current, speed }), "debounced");
+          }}
+          onVolumeChange={(volume: number) => {
+            updateDraftConfig((current) => ({ ...current, volume }), "debounced");
+          }}
+        />
+
         <div className="glass-card-light rounded-xl p-3 space-y-2">
-          <div className="flex items-center gap-2">
-            <Volume2 className="w-4 h-4 text-orange-400" />
-            <h3 className="text-sm font-semibold text-white">Text-to-Speech</h3>
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Volume2 className="h-4 w-4 text-orange-400" />
+              <h3 className="text-sm font-semibold text-white">Speak Message</h3>
+            </div>
+            <StatusBadge
+              variant={ttsDisabledReason ? "warning" : "success"}
+              label={ttsDisabledReason ? "TTS blocked" : "TTS ready"}
+            />
           </div>
           <InputWithAction
             value={ttsText}
             onChange={setTtsText}
             onSubmit={sendTTS}
-            placeholder="Type message to speak..."
+            placeholder="Type message for rover speech output"
             icon={Send}
-            disabled={!isConnected || isSendingTTS}
+            buttonText="Speak Now"
+            disabled={Boolean(ttsDisabledReason) || isSendingTTS}
           />
-        </div>
-
-        <div className="glass-card-light rounded-xl p-3 space-y-2">
-          <div className="flex items-center gap-2">
-            <Radio className="w-4 h-4 text-green-400" />
-            <h3 className="text-sm font-semibold text-white">Voice Modes</h3>
-            {activeMode && (
-              <IconBadge
-                icon={isWalkieActive ? Headphones : Radio}
-                label={activeMode}
-                color="text-green-400"
-                size="sm"
-                animated
-              />
-            )}
-          </div>
+          <p className="text-xs text-white/55">
+            Uses the current authoritative global TTS config.
+          </p>
+          {ttsDisabledReason && (
+            <p
+              role="status"
+              aria-live="polite"
+              className="text-xs text-amber-200"
+            >
+              {ttsDisabledReason}
+            </p>
+          )}
         </div>
 
         <VoiceCommandPanel
@@ -463,35 +684,38 @@ export const VoiceControls: React.FC<VoiceControlsProps> = ({
         <div className="glass-card-light rounded-xl p-3 space-y-2">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <Headphones className="w-4 h-4 text-cyan-400" />
+              <Headphones className="h-4 w-4 text-cyan-400" />
               <span className="text-sm font-semibold text-white">Walkie-Talkie</span>
             </div>
             <StatusBadge
               variant={isWalkieActive ? "online" : "offline"}
+              label={isWalkieActive ? "Walkie live" : "Walkie idle"}
               animated={isWalkieActive}
             />
           </div>
-          <p className="text-xs text-white/60">Stream audio directly to rover</p>
+          <p className="text-xs text-white/60">
+            Live mic stream. Preempts browser capture and local TTS while active.
+          </p>
           <button
             type="button"
             onClick={() => void toggleWalkieTalkie()}
             disabled={!isConnected || isWalkieStarting}
             data-testid="walkie-toggle"
-            className={`w-full py-2 px-4 rounded-lg font-semibold transition-all duration-200 ${
+            className={`w-full rounded-lg px-4 py-2 font-semibold transition-all duration-200 ${
               isWalkieActive
                 ? "bg-red-500/20 text-red-400 hover:bg-red-500/30"
                 : "bg-green-500/20 text-green-400 hover:bg-green-500/30"
-            } disabled:opacity-50 disabled:cursor-not-allowed`}
+            } disabled:cursor-not-allowed disabled:opacity-50`}
           >
             {isWalkieStarting ? "Starting…" : isWalkieActive ? "Stop" : "Start"}
           </button>
           {isWalkieActive && (
             <div>
-              <div className="flex justify-between text-xs text-white/60 mb-1">
+              <div className="mb-1 flex justify-between text-xs text-white/60">
                 <span>Audio Level</span>
                 <span>{Math.round(walkieAudioLevel * 100)}%</span>
               </div>
-              <div className="w-full h-2 bg-slate-700/50 rounded-full overflow-hidden">
+              <div className="h-2 w-full overflow-hidden rounded-full bg-slate-700/50">
                 <div
                   className="h-full bg-emerald-500 transition-all duration-100"
                   style={{ width: `${Math.min(100, walkieAudioLevel * 100)}%` }}
@@ -499,12 +723,6 @@ export const VoiceControls: React.FC<VoiceControlsProps> = ({
               </div>
             </div>
           )}
-        </div>
-
-        <div className="text-xs text-white/40 space-y-1">
-          <p>• <strong>Voice Commands:</strong> private browser capture and final results</p>
-          <p>• <strong>Walkie-Talkie:</strong> direct audio streaming for communication</p>
-          <p>• <strong>TTS:</strong> manually send text for the rover to speak</p>
         </div>
       </div>
     </DraggablePanel>

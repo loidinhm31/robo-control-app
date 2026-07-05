@@ -518,7 +518,10 @@ Displays `fleet_roster` with per-rover metrics (battery, CPU, memory, FPS). Onli
 
 ### VoiceControls + TranscriptionDisplay
 
-- `VoiceControls` renders browser-private command history, backend-owned STT readiness/profile, current capture target label, and manual TTS controls.
+- `VoiceControls` renders browser-private command history, backend-owned STT readiness/profile, current capture target label, manual TTS controls, and authoritative TTS config state.
+- `VoiceConfigCard` owns language/speaker/quality/speed/volume controls plus desired vs applied revision badges.
+- `VoiceAlertRegion` shows accessible walkie/TTS rejection and interruption alerts with dismiss support.
+- `VoiceCommandPanel` owns browser STT capture toggle, mic level, and private transcript history.
 - `TranscriptionDisplay` renders only rover/fleet transcription history with rover badge, profile/language metadata, final text, and optional confidence.
 - `RoboRoverControl` owns the socket listeners and keeps browser/private history separate from fleet-visible rover history.
 - Browser-private transcript text is not copied into the general page log stream.
